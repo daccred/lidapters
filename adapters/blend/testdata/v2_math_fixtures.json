@@ -1,0 +1,123 @@
+[
+  {
+    "name": "single_collateral_no_debt",
+    "input": {
+      "LedgerSeq": 62490000,
+      "CloseTime": "2026-01-01T00:00:00Z",
+      "State": {
+        "Pools": [
+          {
+            "ContractID": "CPOOLV2AAAAAA0000000000000000000000000000000000000000",
+            "BackstopTakeRate": "0",
+            "WasmHash": "wasm-v2-main",
+            "Reserves": [
+              {
+                "AssetID": "CASSETV2AAAA0000000000000000000000000000000000000000",
+                "AssetDecimals": 7,
+                "BRateRaw": "1000000000000",
+                "DRateRaw": "1000000000000",
+                "BSupplyRaw": "10000000000",
+                "DSupplyRaw": "0",
+                "CFactorRaw": "8000000",
+                "LFactorRaw": "9000000",
+                "UtilTargetRaw": "8000000",
+                "MaxUtilRaw": "9500000",
+                "RBaseRaw": "0",
+                "ROneRaw": "0",
+                "RTwoRaw": "0",
+                "RThreeRaw": "0",
+                "RateModifierRaw": "1000000000",
+                "SupplyCapRaw": "100000000000000",
+                "OraclePriceRaw": "100000000",
+                "OracleDecimals": 8
+              }
+            ]
+          }
+        ],
+        "Users": [
+          {
+            "Address": "GUSERONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "PoolContractID": "CPOOLV2AAAAAA0000000000000000000000000000000000000000",
+            "AssetID": "CASSETV2AAAA0000000000000000000000000000000000000000",
+            "PositionType": "collateral",
+            "BTokensRaw": "10000000000"
+          }
+        ]
+      }
+    },
+    "expect": {
+      "address": "GUSERONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "deposited_usd": "1000",
+      "borrowed_usd": "0",
+      "effective_collateral_usd": "0",
+      "effective_liability_usd": "0",
+      "health_factor": "",
+      "borrow_limit_pct": "0",
+      "borrow_cap_usd": "800"
+    }
+  },
+  {
+    "name": "single_collateral_single_debt",
+    "input": {
+      "LedgerSeq": 62490001,
+      "CloseTime": "2026-01-01T00:00:10Z",
+      "State": {
+        "Pools": [
+          {
+            "ContractID": "CPOOLV2BBBBBB0000000000000000000000000000000000000000",
+            "BackstopTakeRate": "0",
+            "WasmHash": "wasm-v2-main",
+            "Reserves": [
+              {
+                "AssetID": "CASSETV2BBBB0000000000000000000000000000000000000000",
+                "AssetDecimals": 7,
+                "BRateRaw": "1000000000000",
+                "DRateRaw": "1000000000000",
+                "BSupplyRaw": "10000000000",
+                "DSupplyRaw": "4000000000",
+                "CFactorRaw": "8000000",
+                "LFactorRaw": "9000000",
+                "UtilTargetRaw": "8000000",
+                "MaxUtilRaw": "9500000",
+                "RBaseRaw": "0",
+                "ROneRaw": "0",
+                "RTwoRaw": "0",
+                "RThreeRaw": "0",
+                "RateModifierRaw": "1000000000",
+                "SupplyCapRaw": "100000000000000",
+                "OraclePriceRaw": "100000000",
+                "OracleDecimals": 8
+              }
+            ]
+          }
+        ],
+        "Users": [
+          {
+            "Address": "GUSERTWOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "PoolContractID": "CPOOLV2BBBBBB0000000000000000000000000000000000000000",
+            "AssetID": "CASSETV2BBBB0000000000000000000000000000000000000000",
+            "PositionType": "collateral",
+            "BTokensRaw": "10000000000"
+          },
+          {
+            "Address": "GUSERTWOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "PoolContractID": "CPOOLV2BBBBBB0000000000000000000000000000000000000000",
+            "AssetID": "CASSETV2BBBB0000000000000000000000000000000000000000",
+            "PositionType": "liability",
+            "DTokensRaw": "4000000000"
+          }
+        ]
+      }
+    },
+    "expect": {
+      "address": "GUSERTWOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "deposited_usd": "1000",
+      "borrowed_usd": "400",
+      "effective_collateral_usd": "800",
+      "effective_liability_usd": "444.444444444444444445",
+      "health_factor": "1.799999999999999999",
+      "borrow_limit_pct": "0.555555555555555556",
+      "borrow_cap_usd": "355.555555555555555555"
+    }
+  }
+]

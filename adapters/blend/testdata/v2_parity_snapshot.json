@@ -1,0 +1,26 @@
+{
+  "ledger_seq": 62490010,
+  "close_time": "2026-01-01T00:01:00Z",
+  "wasm_hash": "wasm-v2-main",
+  "address": "GUSERPARITYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "pool_contract": "CPOOLV2PARITY00000000000000000000000000000000000000",
+  "asset_id": "CASSETV2PARITY00000000000000000000000000000000000000",
+  "asset_decimals": 7,
+  "oracle_decimals": 8,
+  "b_rate_raw": "1100000000000",
+  "d_rate_raw": "1250000000000",
+  "b_tokens_raw": "5000000000",
+  "d_tokens_raw": "2000000000",
+  "oracle_price_raw": "100000000",
+  "c_factor_raw": "8000000",
+  "l_factor_raw": "9000000",
+  "expected_supply_asset_raw": "5500000000",
+  "expected_borrow_asset_raw": "2500000000",
+  "expected_supply_usd": "550",
+  "expected_borrow_usd": "250",
+  "expected_effective_collateral_usd": "440",
+  "expected_effective_liability_usd": "277.777777777777777777777777777777777777777777777778",
+  "expected_health_factor": "1.583999999999999999999999999999999999999999999999999424",
+  "expected_borrow_limit_pct": "0.6313131313131313131313131313131313131313131313131318181818181818181818181818181818181818181818182"
+}
+

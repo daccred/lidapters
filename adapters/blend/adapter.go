@@ -107,6 +107,7 @@ func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.Tran
 			AssetID:      decoded.assetID,
 			AmountRaw:    decoded.amountRaw,
 			ShareAmount:  decoded.shareRaw,
+			ShareType:    shareTypeForActivity(decoded.activityType),
 			Direction:    decoded.direction,
 			Timestamp:    evt.CloseTime,
 			Metadata:     decoded.metadata,

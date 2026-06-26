@@ -260,6 +260,22 @@ func directionForActivity(a contractsv1.ActivityType) string {
 	}
 }
 
+// shareTypeForActivity classifies the position-share an activity moves, using
+// the same vocabulary as PositionType (supply / liability). Deposits and
+// withdrawals move supply shares; borrows and repays move liability. Activities
+// whose share semantics are not determinable from the type alone (liquidation,
+// claim_rewards, status changes, etc.) return "" so the store can COALESCE.
+func shareTypeForActivity(a contractsv1.ActivityType) string {
+	switch a {
+	case contractsv1.ActivityTypeDeposit, contractsv1.ActivityTypeWithdraw:
+		return string(contractsv1.PositionTypeSupply)
+	case contractsv1.ActivityTypeBorrow, contractsv1.ActivityTypeRepay:
+		return string(contractsv1.PositionTypeLiability)
+	default:
+		return ""
+	}
+}
+
 func extractAddresses(s string) (wallet, asset string) {
 	matches := addressRE.FindAllString(s, -1)
 	for _, m := range matches {

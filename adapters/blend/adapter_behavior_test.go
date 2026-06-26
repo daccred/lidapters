@@ -350,6 +350,61 @@ func TestContractEventDataAddressProducesActivity(t *testing.T) {
 	}
 }
 
+func TestActivityShareTypeDerivedFromActivityType(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(DefaultConfig())
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	cases := []struct {
+		event     string
+		wantShare string
+	}{
+		{"supply", "supply"},
+		{"withdraw", "supply"},
+		{"borrow", "liability"},
+		{"repay", "liability"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.event, func(t *testing.T) {
+			wallet := accountAddressVal(t, 7)
+			asset := contractAddressVal(t, 8)
+			raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, tc.event)}, mapVal(t, map[string]xdr.ScVal{
+				"user":   wallet,
+				"asset":  asset,
+				"amount": i128Val(12345),
+			}))
+
+			out, err := adapter.Transform(contractsv1.TransformInput{
+				LedgerSeq: 124,
+				CloseTime: time.Unix(11, 0).UTC(),
+				Events: []contractsv1.RawEventEnvelope{{
+					LedgerSeq:  124,
+					TxHash:     "tx-" + tc.event,
+					EventIndex: 0,
+					ContractID: validContractString(t, 49),
+					Topic:      `{"topics":["` + tc.event + `"]}`,
+					RawEvent:   raw,
+					CloseTime:  time.Unix(11, 0).UTC(),
+					Metadata:   map[string]string{"protocol_id": "blend"},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("transform: %v", err)
+			}
+			if len(out.Activities) != 1 {
+				t.Fatalf("expected one activity, got %d", len(out.Activities))
+			}
+			if out.Activities[0].ShareType != tc.wantShare {
+				t.Fatalf("expected share_type %q for %s, got %q", tc.wantShare, tc.event, out.Activities[0].ShareType)
+			}
+		})
+	}
+}
+
 func TestConfiguredSingleV2HashEnrichesPoolShapedState(t *testing.T) {
 	t.Parallel()
 

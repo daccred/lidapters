@@ -370,6 +370,93 @@ func TestReservePositionAPRMissingEmissionsStaysPartial(t *testing.T) {
 	}
 }
 
+func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	// UtilTargetRaw == 0 with non-zero utilization makes the borrow (and hence
+	// supply) base APR invalid, so apr stays partial; but the raw emissions APRs
+	// parse and must be surfaced independently into metadata.
+	out, err := adapter.Transform(contractsv1.TransformInput{
+		LedgerSeq: 6,
+		CloseTime: time.Unix(50, 0).UTC(),
+		State: &contractsv1.LedgerState{
+			Pools: []contractsv1.PoolState{{
+				ContractID:       "CPOOL",
+				WasmHash:         "wasm-v2",
+				BackstopTakeRate: "0",
+				Reserves: []contractsv1.ReserveState{{
+					AssetID:            "CASSET",
+					AssetDecimals:      7,
+					BRateRaw:           "1000000000000",
+					DRateRaw:           "1000000000000",
+					BSupplyRaw:         "100000000",
+					DSupplyRaw:         "10000000",
+					CFactorRaw:         "8000000",
+					LFactorRaw:         "10000000",
+					UtilTargetRaw:      "0",
+					MaxUtilRaw:         "9500000",
+					RBaseRaw:           "0",
+					ROneRaw:            "1000000",
+					RTwoRaw:            "0",
+					RThreeRaw:          "0",
+					RateModifierRaw:    "10000000",
+					SupplyCapRaw:       "100000000000",
+					OraclePriceRaw:     "100000000",
+					OracleDecimals:     8,
+					SupplyEmissionsAPR: "0.003",
+					BorrowEmissionsAPR: "0.005",
+				}},
+			}},
+			Users: []contractsv1.UserReservePosition{
+				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeSupply, BTokensRaw: "10000000"},
+				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeLiability, DTokensRaw: "10000000"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	supply := findPosition(out, contractsv1.PositionTypeSupply)
+	if supply == nil {
+		t.Fatalf("expected supply position")
+	}
+	if supply.APY != "" {
+		t.Fatalf("expected NULL APY when base APR invalid, got %s", supply.APY)
+	}
+	if supply.Metadata["apr_partial"] != "true" {
+		t.Fatalf("expected apr_partial=true on supply, got %q", supply.Metadata["apr_partial"])
+	}
+	if supply.Metadata["supply_emissions_apr"] != "0.003" {
+		t.Fatalf("expected supply_emissions_apr surfaced as 0.003, got %q", supply.Metadata["supply_emissions_apr"])
+	}
+	if supply.Metadata["net_supply_apr"] != "" {
+		t.Fatalf("expected no net_supply_apr when base APR invalid, got %q", supply.Metadata["net_supply_apr"])
+	}
+
+	liability := findPosition(out, contractsv1.PositionTypeLiability)
+	if liability == nil {
+		t.Fatalf("expected liability position")
+	}
+	if liability.APY != "" {
+		t.Fatalf("expected NULL APY when base APR invalid, got %s", liability.APY)
+	}
+	if liability.Metadata["apr_partial"] != "true" {
+		t.Fatalf("expected apr_partial=true on liability, got %q", liability.Metadata["apr_partial"])
+	}
+	if liability.Metadata["borrow_emissions_apr"] != "0.005" {
+		t.Fatalf("expected borrow_emissions_apr surfaced as 0.005, got %q", liability.Metadata["borrow_emissions_apr"])
+	}
+	if liability.Metadata["net_borrow_apr"] != "" {
+		t.Fatalf("expected no net_borrow_apr when base APR invalid, got %q", liability.Metadata["net_borrow_apr"])
+	}
+}
+
 func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 	t.Parallel()
 

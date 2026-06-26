@@ -311,7 +311,11 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				positionMeta["supply_emissions_apr"] = numString(emissionsAPR)
 				positionMeta["net_supply_apr"] = apy
 			} else {
-				if strings.TrimSpace(reserve.raw.SupplyEmissionsAPR) == "" {
+				if emissionsAPR, ok := normalizedAPRInput(reserve.raw.SupplyEmissionsAPR); ok {
+					// Base APR is invalid but the raw emissions APR parses: surface
+					// the emission independently of net APR (metadata-served, D-08).
+					positionMeta["supply_emissions_apr"] = numString(emissionsAPR)
+				} else {
 					positionMeta["emissions_apr_unavailable"] = "true"
 				}
 				positionMeta["apr_partial"] = "true"
@@ -326,7 +330,11 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				positionMeta["borrow_emissions_apr"] = numString(emissionsAPR)
 				positionMeta["net_borrow_apr"] = apy
 			} else {
-				if strings.TrimSpace(reserve.raw.BorrowEmissionsAPR) == "" {
+				if emissionsAPR, ok := normalizedAPRInput(reserve.raw.BorrowEmissionsAPR); ok {
+					// Base APR is invalid but the raw emissions APR parses: surface
+					// the emission independently of net APR (metadata-served, D-08).
+					positionMeta["borrow_emissions_apr"] = numString(emissionsAPR)
+				} else {
 					positionMeta["emissions_apr_unavailable"] = "true"
 				}
 				positionMeta["apr_partial"] = "true"
@@ -480,7 +488,13 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		}
 		if !interestKnown || !emissionsKnown {
 			metadata["apr_partial"] = "true"
-			metadata["emissions_apr_unavailable"] = "true"
+			if emissionsKnown {
+				// Net APR stays partial (interest missing) but the raw emissions
+				// APY parses: surface it independently (metadata-served, D-08).
+				metadata["backstop_emissions_apr"] = numString(parseDecimalOrZero(backstop.BackstopEmissionsAPY))
+			} else {
+				metadata["emissions_apr_unavailable"] = "true"
+			}
 		} else {
 			interestAPY := parseDecimalOrZero(backstop.BackstopInterestAPY)
 			emissionsAPY := parseDecimalOrZero(backstop.BackstopEmissionsAPY)

@@ -1,0 +1,32 @@
+{
+  "_comment": "D-09 decode-half fixtures. Each scenario drives a Blend pool Config contract_data change through DecodeState and asserts the resulting LedgerState liveness. These pin the CAP-0062/Protocol-23 trap: eviction is a Live=false signal and TTL-expiry is LiveUntilLedgerSeq < ledgerSeq, both distinct from a value being present. Close-meta-level extraction (EvictedLedgerKeys / TtlEntry fold) is plan V's extract_test.go; here we only assert the decode consumes the signals.",
+  "scenarios": [
+    {
+      "scenario": "evict",
+      "description": "Live=false (the relay extract sets this from EvictedLedgerKeys) removes a previously-live pool from LedgerState.",
+      "prior": true,
+      "live": false,
+      "ledger_seq": 101,
+      "expect_present": false
+    },
+    {
+      "scenario": "ttl_expiry",
+      "description": "A change whose LiveUntilLedgerSeq is below ledgerSeq is expired, so the pool is not live even though Live=true and a value is present.",
+      "prior": true,
+      "live": true,
+      "live_until_ledger_seq": 90,
+      "ledger_seq": 101,
+      "expect_present": false
+    },
+    {
+      "scenario": "restore",
+      "description": "ChangeType=Restored with Live=true and a fresh LiveUntilLedgerSeq re-livens a pool that had been evicted (no prior state).",
+      "prior": false,
+      "change_type": "Restored",
+      "live": true,
+      "live_until_ledger_seq": 200,
+      "ledger_seq": 101,
+      "expect_present": true
+    }
+  ]
+}

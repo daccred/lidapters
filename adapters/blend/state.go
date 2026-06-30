@@ -1,14 +1,13 @@
-// D-18: Blend contract_data -> typed LedgerState decode lives here, in the OSS
-// adapter, not the closed relay. This is the moat boundary (protocol decode is
-// adapter code) and keeps the protocol self-contained (event decode + state
-// decode + transform in one package). Relocated from the relay's internal
-// blendstate/{typed_mirror,mirror,discovery,scval_decode}.go.
+// Blend contract_data -> typed LedgerState decode lives here, in the protocol
+// adapter rather than the relay core. Keeping decode in the adapter is what
+// makes the protocol self-contained: event decode, state decode, and transform
+// all live in one package.
 //
-// D-20: DecodeState is a stateless PURE reducer — (prior, changes, ledgerSeq) ->
-// next. The Adapter retains no per-ledger scratch; every carry-over threads
-// through *contractsv1.LedgerState (PendingUserPositions carries the one piece of
-// builder state that does not otherwise round-trip). A stateless reducer is
-// trivially run-twice byte-identical (the I4 determinism gate) and cannot leak
+// DecodeState is a stateless PURE reducer — (prior, changes, ledgerSeq) -> next.
+// The Adapter retains no per-ledger scratch; every carry-over threads through
+// *contractsv1.LedgerState (PendingUserPositions carries the one piece of builder
+// state that does not otherwise round-trip). Because it keeps no hidden state,
+// folding the same input twice yields byte-identical output, and it cannot leak
 // map-iteration order or wall-clock reads across ledgers.
 package blend
 
@@ -22,18 +21,18 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// DecodeState folds Blend contract_data changes into typed ledger state (D-18).
-// It is a pure reducer (D-20): it rebuilds a fresh in-memory mirror from prior,
-// applies changes, and returns the freshly built LedgerState. No DB / network /
-// clock / random / map-order; deterministic and run-twice byte-identical.
+// DecodeState folds Blend contract_data changes into typed ledger state. It is
+// a pure reducer: it rebuilds a fresh in-memory mirror from prior, applies
+// changes, and returns the freshly built LedgerState. No DB / network / clock /
+// random / map-order; deterministic and run-twice byte-identical.
 func (a *Adapter) DecodeState(prior *contractsv1.LedgerState, changes []contractsv1.ContractDataChange, ledgerSeq int64) (*contractsv1.LedgerState, error) {
 	next, _ := a.decodeBlendState(prior, changes, ledgerSeq)
 	return &next, nil
 }
 
-// OwnsContract reports whether contractID belongs to Blend (D-18). Ownership is
-// the runtime-discovered pool/backstop/oracle set fed in via RegisterContracts;
-// it is config-like (not per-ledger scratch), so it does not break DecodeState
+// OwnsContract reports whether contractID belongs to Blend. Ownership is the
+// runtime-discovered pool/backstop/oracle set fed in via RegisterContracts; it
+// is config-like (not per-ledger scratch), so it does not break DecodeState
 // purity.
 func (a *Adapter) OwnsContract(contractID string) bool {
 	if contractID == "" {
@@ -128,11 +127,11 @@ func (a *Adapter) decodeBlendState(prior *contractsv1.LedgerState, changes []con
 		b.apply(change, ledgerSeq)
 	}
 
-	// D-03: the deltas are appended from map-range iteration over the builder
-	// maps (appendPoolReserves / appendPoolUsers / appendBackstopUsersForPool),
-	// which is the determinism leak the run-twice gate guards against. Sort by a
-	// stable total-order key before emit. (The prior relay sortTypedChanges sorted
-	// the typed lists but never the Deltas — that was the bug.)
+	// The deltas are appended from map-range iteration over the builder maps
+	// (appendPoolReserves / appendPoolUsers / appendBackstopUsersForPool), and Go
+	// map order is randomized, so two runs over the same ledgers would otherwise
+	// emit them in different orders. Sort by a stable total-order key before emit
+	// so the output is byte-identical run to run.
 	sort.SliceStable(b.deltas, func(i, j int) bool {
 		di, dj := b.deltas[i], b.deltas[j]
 		if di.EntityType != dj.EntityType {
@@ -153,10 +152,10 @@ func (a *Adapter) decodeBlendState(prior *contractsv1.LedgerState, changes []con
 	return b.build(), b.deltas
 }
 
-// loadPrior reconstructs the mirror from the prior LedgerState so the reducer is
-// stateless across ledgers (D-20). Pools/reserves come from prior.Pools,
-// backstop balances from prior.Backstops, and raw user-position blobs from
-// prior.PendingUserPositions.
+// loadPrior reconstructs the mirror from the prior LedgerState so the reducer
+// keeps no state of its own between ledgers. Pools/reserves come from
+// prior.Pools, backstop balances from prior.Backstops, and raw user-position
+// blobs from prior.PendingUserPositions.
 func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
 	for _, pool := range prior.Pools {
 		pb := ensurePool(b.pools, pool.ContractID)
@@ -195,7 +194,7 @@ func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
 }
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
-// the output is run-twice byte-identical (D-03).
+// the output is byte-identical when the same input is folded twice.
 func (b *blendStateBuilder) build() contractsv1.LedgerState {
 	pools := make([]contractsv1.PoolState, 0, len(b.pools))
 	users := make([]contractsv1.UserReservePosition, 0)
@@ -207,7 +206,8 @@ func (b *blendStateBuilder) build() contractsv1.LedgerState {
 		pools = append(pools, pool.state)
 	}
 	for _, p := range b.pendingPos {
-		// Raw blob round-trips regardless of whether the pool is known yet (D-20).
+		// Raw blob round-trips regardless of whether the pool is known yet, so a
+		// position decoded before its pool appears is not lost.
 		pending = append(pending, contractsv1.PendingUserPosition{
 			Address:        p.user,
 			PoolContractID: p.poolContract,
@@ -246,10 +246,12 @@ func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerS
 		return
 	}
 
-	// D-09 (decode-half): an entry is live only if the change says so AND its TTL
-	// has not lapsed. Live=false covers eviction (the relay extract sets it from
-	// EvictedLedgerKeys); LiveUntilLedgerSeq < ledgerSeq covers TTL expiry. Either
-	// makes the entry not-live, so we apply it as a delete.
+	// An entry is live only if the change says so AND its TTL has not lapsed.
+	// Live=false covers eviction (the relay extract sets it from the close meta's
+	// evicted-key set, which is reported separately from the change stream);
+	// LiveUntilLedgerSeq < ledgerSeq covers TTL expiry. Either makes the entry
+	// not-live, so we apply it as a delete — otherwise evicted or expired state
+	// would read as live forever.
 	live := change.Live && change.ValueXDR != nil
 	if change.LiveUntilLedgerSeq != nil && int64(*change.LiveUntilLedgerSeq) < ledgerSeq {
 		live = false
@@ -662,7 +664,7 @@ func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
 
 // finalizePoolReserves rebuilds reserveByIndex from scratch and sorts the pool's
 // reserves by (ReserveIndex, AssetID) so reserve ordering is index-stable and
-// deterministic (D-03).
+// identical run to run.
 func finalizePoolReserves(pool *poolBuilder) {
 	pool.reserveByIndex = map[int32]string{}
 	for assetID, reserve := range pool.reserves {

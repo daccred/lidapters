@@ -57,10 +57,10 @@ func representativeChanges(t *testing.T) []contractsv1.ContractDataChange {
 	}
 }
 
-// TestDecodeState_RunTwiceByteIdentical is the D-03 determinism gate: the same
+// TestDecodeState_RunTwiceByteIdentical is the determinism gate: the same
 // (prior, changes, ledgerSeq) folded twice must serialize byte-identically. This
 // catches map-iteration-order leaks and hidden accumulators that a stateless
-// pure reducer (D-20) must not have.
+// pure reducer must not have.
 func TestDecodeState_RunTwiceByteIdentical(t *testing.T) {
 	t.Parallel()
 
@@ -95,8 +95,8 @@ func TestDecodeState_RunTwiceByteIdentical(t *testing.T) {
 }
 
 // TestDecodeState_DeltasSorted asserts the silver-debug deltas are emitted in a
-// stable total-order key (the D-03 fix: the prior relay never sorted Deltas, so
-// they leaked map order).
+// stable total-order key, so they do not leak Go's randomized map-iteration
+// order from one run to the next.
 func TestDecodeState_DeltasSorted(t *testing.T) {
 	t.Parallel()
 
@@ -142,7 +142,7 @@ type evictionScenario struct {
 	ExpectPresent      bool    `json:"expect_present"`
 }
 
-// TestDecodeState_EvictionTTLRestore is the D-09 decode-half gate: it drives the
+// TestDecodeState_EvictionTTLRestore is the eviction/TTL gate: it drives the
 // three liveness fixtures (evict / TTL-expiry / restore) through DecodeState and
 // asserts the pool's presence in the resulting LedgerState. Zero DB/network.
 func TestDecodeState_EvictionTTLRestore(t *testing.T) {

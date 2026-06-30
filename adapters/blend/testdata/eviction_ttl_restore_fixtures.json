@@ -1,5 +1,5 @@
 {
-  "_comment": "D-09 decode-half fixtures. Each scenario drives a Blend pool Config contract_data change through DecodeState and asserts the resulting LedgerState liveness. These pin the CAP-0062/Protocol-23 trap: eviction is a Live=false signal and TTL-expiry is LiveUntilLedgerSeq < ledgerSeq, both distinct from a value being present. Close-meta-level extraction (EvictedLedgerKeys / TtlEntry fold) is plan V's extract_test.go; here we only assert the decode consumes the signals.",
+  "_comment": "Eviction/TTL decode fixtures. Each scenario drives a Blend pool Config contract_data change through DecodeState and asserts the resulting LedgerState liveness. They pin the Soroban liveness trap: eviction is a Live=false signal and TTL-expiry is LiveUntilLedgerSeq < ledgerSeq, both distinct from a value simply being present. Pulling those signals out of the close meta (the evicted-key set / the TTL fold) is covered elsewhere; here we only assert the decoder acts on them.",
   "scenarios": [
     {
       "scenario": "evict",

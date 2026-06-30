@@ -113,33 +113,33 @@ type LedgerState struct {
 	Pools     []PoolState
 	Users     []UserReservePosition
 	Backstops []BackstopPosition
-	// PendingUserPositions carries raw decode scratch across ledgers so a
-	// protocol's DecodeState can stay a stateless pure reducer (D-20). See
+	// PendingUserPositions carries raw decode scratch across ledgers so the
+	// decoder can stay a stateless pure reducer: anything that must survive from
+	// one ledger to the next rides in this returned value rather than on the
+	// decoder, which is what keeps repeated runs byte-identical. See
 	// PendingUserPosition. Carried state only — never emitted to gold.
 	PendingUserPositions []PendingUserPosition
 }
 
 // PendingUserPosition retains a Blend user's raw, not-yet-resolved positions
-// ScVal so DecodeState can stay a stateless pure reducer (D-20): user positions
-// are keyed by reserve index in the raw blob and only resolve to assets against
-// a pool's reserve map at build time, so the blob must survive prior->next
-// round-trips to be re-resolved when reserves change. This is the one piece of
-// TypedMirror builder state that does not otherwise round-trip through the typed
-// slices above, so per D-20 it is represented here rather than via an opaque
-// handle.
+// ScVal so the decoder can stay a stateless pure reducer: user positions are
+// keyed by reserve index in the raw blob and only resolve to assets against a
+// pool's reserve map when the state is built, so the blob must survive the
+// prior->next round-trip to be re-resolved when reserves change. It is the one
+// piece of builder scratch the typed slices above cannot represent, so it is
+// carried here explicitly rather than hidden behind an opaque handle.
 type PendingUserPosition struct {
 	Address        string
 	PoolContractID string
 	PositionsXDR   string // base64 ScVal of the user's positions map
 }
 
-// ContractDataChange is the shared seam vocabulary between the relay's
-// protocol-agnostic projector edge (which extracts these from raw ledger meta,
-// per D-18) and a protocol adapter's DecodeState (which folds them into typed
-// state). It is the contract_data delta for one ledger entry. Relocated here
-// from the relay's internal blendstate.ContractDataChange; the silver-only
-// hash/JSON debug fields are dropped (their only consumer, the retiring debug
-// writer, goes away).
+// ContractDataChange is the shared vocabulary between the relay's
+// protocol-agnostic projector edge (which extracts these from raw ledger meta)
+// and a protocol adapter's DecodeState (which folds them into typed state). It
+// is the contract_data delta for one ledger entry. The silver-only hash/JSON
+// debug fields the relay's prior struct carried are dropped here, since their
+// only consumer (a debug writer) is gone.
 type ContractDataChange struct {
 	ContractID string
 	KeyXDR     string  // base64 ScVal
@@ -147,42 +147,43 @@ type ContractDataChange struct {
 	Durability string
 	ChangeType string // Created/Updated/Restored/Removed
 	Live       bool
-	// LiveUntilLedgerSeq is the TTL-liveness signal (D-09): the ledger up to
-	// which this entry is live. The relay extract (plan V) populates it from the
-	// close-meta TtlEntry fold; DecodeState treats *LiveUntilLedgerSeq < ledgerSeq
-	// as expired. nil means no TTL signal was attached. The prior relay struct
-	// could not carry TTL, which is the D-09 root cause this field fixes.
+	// LiveUntilLedgerSeq is the TTL-liveness signal: the ledger up to which this
+	// entry is live. The relay extract populates it from the close-meta TtlEntry
+	// fold; DecodeState treats *LiveUntilLedgerSeq < ledgerSeq as expired. nil
+	// means no TTL signal was attached. On Soroban an entry's data and its TTL
+	// are separate ledger entries, so without carrying the TTL here expired state
+	// would read as live forever.
 	LiveUntilLedgerSeq *uint32
 	LastModifiedLedger uint32
 }
 
 // ProtocolAdapter is the seam the relay's protocol-agnostic projector consumes
-// and each lidapters protocol implements (D-18). It extends the prior
-// ID/Protocol/Transform interface (which lived in the closed relay) with the
-// decode half, so a protocol becomes self-contained: event decode, state
-// decode, and transform all live in the OSS adapter, not the closed relay.
+// and each protocol adapter implements. It folds the decode half into the older
+// ID/Protocol/Transform interface so a protocol is fully self-contained: event
+// decode, state decode, and transform all live in the adapter rather than being
+// split between the adapter and the relay core.
 type ProtocolAdapter interface {
 	ID() string
 	Protocol() string
 
 	// OwnsContract reports whether a contract_data change / event for contractID
 	// belongs to this protocol. It subsumes the relay router contract-match +
-	// blendstate discovery (ADR-6: classification is consumer-side).
+	// protocol classification, which happens consumer-side, inside the adapter.
 	OwnsContract(contractID string) bool
 
 	// DecodeState folds this protocol's contract_data changes into typed state.
 	//
-	// D-18: decode is adapter-owned — it is the moat boundary (protocol decode is
-	// OSS adapter code, not the closed relay) and keeps each protocol
-	// self-contained (event decode + state decode + transform in one place).
+	// Decode is adapter-owned: keeping protocol decode in the adapter (rather
+	// than in the relay core) is what makes each protocol self-contained — event
+	// decode, state decode, and transform in one place.
 	//
-	// D-20: it is a stateless PURE reducer — (prior, changes, ledgerSeq) -> next,
-	// with no DB/network/clock/random and no hidden accumulator retained on the
-	// adapter. A stateless reducer is trivially run-twice byte-identical (the I4
-	// determinism gate) because there is no per-ledger scratch to leak map
-	// iteration order or time.Now between calls; all carry-over threads through
-	// *LedgerState (PendingUserPositions carries the one piece of raw scratch that
-	// does not otherwise round-trip).
+	// It is a stateless PURE reducer — (prior, changes, ledgerSeq) -> next, with
+	// no DB/network/clock/random and no hidden accumulator retained on the
+	// adapter. With no per-ledger scratch, folding the same input twice yields
+	// byte-identical output: there is nothing to leak map-iteration order or
+	// time.Now between calls; all carry-over threads through *LedgerState
+	// (PendingUserPositions carries the one piece of raw scratch that does not
+	// otherwise round-trip).
 	DecodeState(prior *LedgerState, changes []ContractDataChange, ledgerSeq int64) (*LedgerState, error)
 
 	// Transform folds events + typed state into gold. Pure; unchanged by the fold.

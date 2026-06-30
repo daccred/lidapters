@@ -13,7 +13,7 @@ var _ contractsv1.ProtocolAdapter = (*Adapter)(nil)
 
 type Adapter struct {
 	cfg Config
-	// contracts is the owned contract-ID set OwnsContract checks (D-18). It is
+	// contracts is the owned contract-ID set OwnsContract checks. It is
 	// config-like ownership, not per-ledger scratch, so it does not affect the
 	// DecodeState purity guarantee. Seeded empty; the relay projector feeds
 	// discovered pools via RegisterContracts.

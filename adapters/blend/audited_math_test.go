@@ -649,8 +649,11 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 	if summary == nil {
 		t.Fatalf("expected summary")
 	}
-	if summary.LiquidationPrice != "" {
-		t.Fatalf("expected canonical liquidation_price to remain NULL, got %s", summary.LiquidationPrice)
+	// With a single collateral asset the canonical liquidation_price is the
+	// price at which health falls to 1 (current price / health factor =
+	// 1 / 1.6), which matches this pool's own CASSET liquidation scenario below.
+	if summary.LiquidationPrice != "0.625" {
+		t.Fatalf("expected single-collateral liquidation_price 0.625, got %s", summary.LiquidationPrice)
 	}
 	breakdown, ok := summary.StructuredMetadata["pool_breakdown"].(map[string]poolBreakdownEntry)
 	if !ok {

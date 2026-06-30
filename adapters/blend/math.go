@@ -676,6 +676,8 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 			}
 		}
 
+		liquidationPrice := singleCollateralLiquidationPrice(worstPool, minHealth, reserves)
+
 		netAPY := decZero
 		structuredMeta := map[string]any{
 			"risk_semantics":                  "blend_pool_isolated",
@@ -719,7 +721,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 			EffectiveLiabilityUSD:  numString(effectiveLiabilityUSD),
 			NetAPY:                 numString(netAPY),
 			NetAPYWeightUSD:        numString(protocol.netAPYWeightUSD),
-			LiquidationPrice:       "",
+			LiquidationPrice:       liquidationPrice,
 			LedgerSeq:              input.LedgerSeq,
 			Timestamp:              input.CloseTime,
 			Metadata:               meta,
@@ -1004,6 +1006,33 @@ func liquidationScenarios(pool *poolSummaryAccumulator, effectiveLiabilityUSD de
 		}
 	}
 	return scenarios
+}
+
+// singleCollateralLiquidationPrice returns the collateral price at which the
+// worst pool's health factor would fall to 1, but only when that pool has a
+// single collateral asset. With one collateral, effective collateral scales
+// linearly with the asset's price while effective liability does not, so the
+// price that brings health to 1 is simply the current price divided by the
+// current health factor.
+//
+// With zero or several collateral assets the liquidation point depends on which
+// asset's price moves, which is under-determined, so the scalar is left empty;
+// the per-pool liquidation_price_scenarios map carries those cases instead.
+// Collateral and liability rounding are untouched here — this reads the already
+// rounded oracle price and health factor and only divides.
+func singleCollateralLiquidationPrice(worstPool *poolSummaryAccumulator, healthFactor *decimal.Decimal, reserves map[string]normalizedReserve) string {
+	if worstPool == nil || healthFactor == nil || len(worstPool.liquidationCollaterals) != 1 {
+		return ""
+	}
+	if healthFactor.LessThanOrEqual(decZero) {
+		return ""
+	}
+	collateral := worstPool.liquidationCollaterals[0]
+	reserve, ok := reserves[reserveKey(worstPool.poolContract, collateral.assetID)]
+	if !ok || !reserve.priceAvailable {
+		return ""
+	}
+	return numString(reserve.usdPrice.Div(*healthFactor))
 }
 
 func parseFactorRaw(raw string) (decimal.Decimal, bool) {

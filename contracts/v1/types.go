@@ -119,6 +119,42 @@ type LedgerState struct {
 	// decoder, which is what keeps repeated runs byte-identical. See
 	// PendingUserPosition. Carried state only — never emitted to gold.
 	PendingUserPositions []PendingUserPosition
+	// Oracles carries each price oracle's decoded asset->index map, decimals and
+	// per-index raw prices across ledgers. The oracle's instance entry (which
+	// holds the asset list + decimals) is written once at deploy, not on each
+	// set_price, and a price entry only appears in the ledger it changes — so
+	// without carrying this, any ledger after the deploy would rebuild an empty
+	// oracle and reserves would lose their price (the index map would be empty
+	// and price-only ledgers would map nothing). It is the oracle analog of
+	// PendingUserPositions. Carried state only — never emitted to gold.
+	Oracles []OracleState
+}
+
+// OracleState is one price oracle's carried decode state: the shared price
+// decimals, the asset->index map decoded from its instance storage, and the
+// latest raw price per index. It rides in LedgerState so the decoder stays a
+// stateless pure reducer — see LedgerState.Oracles.
+type OracleState struct {
+	ContractID string
+	Decimals   int32
+	Assets     []OracleAssetIndex
+	Prices     []OracleIndexPrice
+}
+
+// OracleAssetIndex binds one asset to its index in the oracle's asset list. The
+// oracle keys each price by this index, so this map is what ties a stored price
+// back to a pool reserve.
+type OracleAssetIndex struct {
+	AssetID string
+	Index   int64
+}
+
+// OracleIndexPrice is one asset's latest raw oracle price, keyed by the asset's
+// index. The raw i128 price is resolved to a reserve at build time once the
+// asset list is known.
+type OracleIndexPrice struct {
+	Index    int64
+	PriceRaw string
 }
 
 // PendingUserPosition retains a Blend user's raw, not-yet-resolved positions

@@ -7,8 +7,17 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 )
 
+// Adapter satisfies contractsv1.ProtocolAdapter: event decode (Transform),
+// state decode (DecodeState, in state.go), and ownership (OwnsContract).
+var _ contractsv1.ProtocolAdapter = (*Adapter)(nil)
+
 type Adapter struct {
 	cfg Config
+	// contracts is the owned contract-ID set OwnsContract checks. It is
+	// config-like ownership, not per-ledger scratch, so it does not affect the
+	// DecodeState purity guarantee. Seeded empty; the relay projector feeds
+	// discovered pools via RegisterContracts.
+	contracts map[string]struct{}
 }
 
 func New(cfg Config) (*Adapter, error) {
@@ -37,7 +46,7 @@ func New(cfg Config) (*Adapter, error) {
 	if merged.V2Scalar == "" {
 		return nil, fmt.Errorf("v2 scalar is required")
 	}
-	return &Adapter{cfg: merged}, nil
+	return &Adapter{cfg: merged, contracts: map[string]struct{}{}}, nil
 }
 
 func (a *Adapter) ID() string {

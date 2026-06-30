@@ -312,8 +312,9 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				positionMeta["net_supply_apr"] = apy
 			} else {
 				if emissionsAPR, ok := normalizedAPRInput(reserve.raw.SupplyEmissionsAPR); ok {
-					// Base APR is invalid but the raw emissions APR parses: surface
-					// the emission independently of net APR (metadata-served, D-08).
+					// Base APR is invalid, so we can't compute a net APR, but the raw
+					// emissions APR parsed and is still useful — surface it on its own
+					// in metadata instead of dropping it.
 					positionMeta["supply_emissions_apr"] = numString(emissionsAPR)
 				} else {
 					positionMeta["emissions_apr_unavailable"] = "true"
@@ -331,8 +332,9 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				positionMeta["net_borrow_apr"] = apy
 			} else {
 				if emissionsAPR, ok := normalizedAPRInput(reserve.raw.BorrowEmissionsAPR); ok {
-					// Base APR is invalid but the raw emissions APR parses: surface
-					// the emission independently of net APR (metadata-served, D-08).
+					// Base APR is invalid, so we can't compute a net APR, but the raw
+					// emissions APR parsed and is still useful — surface it on its own
+					// in metadata instead of dropping it.
 					positionMeta["borrow_emissions_apr"] = numString(emissionsAPR)
 				} else {
 					positionMeta["emissions_apr_unavailable"] = "true"
@@ -489,8 +491,8 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		if !interestKnown || !emissionsKnown {
 			metadata["apr_partial"] = "true"
 			if emissionsKnown {
-				// Net APR stays partial (interest missing) but the raw emissions
-				// APY parses: surface it independently (metadata-served, D-08).
+				// Net APR stays partial (interest missing), but the raw emissions
+				// APY parsed, so surface it on its own in metadata.
 				metadata["backstop_emissions_apr"] = numString(parseDecimalOrZero(backstop.BackstopEmissionsAPY))
 			} else {
 				metadata["emissions_apr_unavailable"] = "true"

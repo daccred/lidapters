@@ -211,6 +211,19 @@ func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
 			q4w:          backstop.Q4W,
 		}
 	}
+	for _, oracle := range prior.Oracles {
+		// The oracle instance is written at deploy, and a price entry only appears
+		// in the ledger it changes, so the asset->index map and the still-live
+		// prices must be restored here for a price-only ledger to resolve anything.
+		ob := b.ensureOracle(oracle.ContractID)
+		ob.decimals = oracle.Decimals
+		for _, asset := range oracle.Assets {
+			ob.assetToIndex[asset.AssetID] = asset.Index
+		}
+		for _, price := range oracle.Prices {
+			ob.priceByIndex[price.Index] = price.PriceRaw
+		}
+	}
 }
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
@@ -263,7 +276,44 @@ func (b *blendStateBuilder) build() contractsv1.LedgerState {
 		Users:                users,
 		Backstops:            backstops,
 		PendingUserPositions: pending,
+		Oracles:              b.buildOracles(),
 	}
+}
+
+// buildOracles snapshots each oracle's carried decode state (decimals,
+// asset->index map, per-index prices) into the returned LedgerState so the next
+// ledger's loadPrior can restore it. Every slice is sorted by a stable key so
+// the run-twice output stays byte-identical.
+func (b *blendStateBuilder) buildOracles() []contractsv1.OracleState {
+	if len(b.oracles) == 0 {
+		return nil
+	}
+	oracles := make([]contractsv1.OracleState, 0, len(b.oracles))
+	for contractID, oracle := range b.oracles {
+		assets := make([]contractsv1.OracleAssetIndex, 0, len(oracle.assetToIndex))
+		for assetID, index := range oracle.assetToIndex {
+			assets = append(assets, contractsv1.OracleAssetIndex{AssetID: assetID, Index: index})
+		}
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].Index != assets[j].Index {
+				return assets[i].Index < assets[j].Index
+			}
+			return assets[i].AssetID < assets[j].AssetID
+		})
+		prices := make([]contractsv1.OracleIndexPrice, 0, len(oracle.priceByIndex))
+		for index, priceRaw := range oracle.priceByIndex {
+			prices = append(prices, contractsv1.OracleIndexPrice{Index: index, PriceRaw: priceRaw})
+		}
+		sort.Slice(prices, func(i, j int) bool { return prices[i].Index < prices[j].Index })
+		oracles = append(oracles, contractsv1.OracleState{
+			ContractID: contractID,
+			Decimals:   oracle.decimals,
+			Assets:     assets,
+			Prices:     prices,
+		})
+	}
+	sort.Slice(oracles, func(i, j int) bool { return oracles[i].ContractID < oracles[j].ContractID })
+	return oracles
 }
 
 func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerSeq int64) {
@@ -799,11 +849,15 @@ func (b *blendStateBuilder) applyOraclePrice(oracleID string, key, value xdr.ScV
 
 // resolveOraclePrices threads each oracle's decoded prices onto the reserves
 // that reference it, matching a reserve to its price by the asset's index in its
-// pool's oracle. A non-positive price is rejected exactly the way the pool
-// contract rejects it on-chain (the price must be greater than zero), leaving the
-// reserve without a price so the downstream USD value and health factor surface
-// as unavailable. An asset not priced in this fold is left untouched, so a
-// price decoded on an earlier ledger carries forward through prior state.
+// pool's oracle. The oracle's asset->index map and prices are carried across
+// ledgers (see LedgerState.Oracles), so this is the single source of a reserve's
+// price every ledger: a price set on an earlier ledger is still in the carried
+// priceByIndex and re-applied here. When the oracle knows the reserve's index
+// but holds no positive price for it — never set, evicted, TTL-lapsed, or
+// non-positive (the contract rejects price <= 0 on-chain) — the reserve's price
+// is cleared so the stale value cannot linger and the downstream USD value and
+// health factor surface as unavailable. An asset the oracle does not list is
+// left untouched.
 func (b *blendStateBuilder) resolveOraclePrices() {
 	for _, pool := range b.pools {
 		oracle := b.oracles[pool.state.OracleContract]
@@ -816,10 +870,7 @@ func (b *blendStateBuilder) resolveOraclePrices() {
 				continue
 			}
 			priceRaw, ok := oracle.priceByIndex[index]
-			if !ok {
-				continue
-			}
-			if isPositiveIntString(priceRaw) {
+			if ok && isPositiveIntString(priceRaw) {
 				reserve.state.OraclePriceRaw = priceRaw
 				reserve.state.OracleDecimals = oracle.decimals
 			} else {

@@ -6,7 +6,7 @@ func TestDeployPinsParse(t *testing.T) {
 	// init() panics if the embedded TOML fails to parse, so reaching here with a
 	// populated table proves the canonical file parsed.
 	if len(DeployPins()) == 0 {
-		t.Fatal("deploy_pins.toml parsed to zero rows")
+		t.Fatal("deployments.toml parsed to zero rows")
 	}
 }
 

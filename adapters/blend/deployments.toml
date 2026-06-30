@@ -1,4 +1,4 @@
-# deploy_pins.toml — canonical Blend deploy-ledger pins.
+# deployments.toml — canonical Blend deploy-ledger pins.
 #
 # A contract's "deploy ledger" is the ledger its instance was created in. It is
 # IMMUTABLE. The relay pins it to floor the in-process fold low enough to capture

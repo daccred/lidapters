@@ -7,7 +7,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-//go:embed deploy_pins.toml
+//go:embed deployments.toml
 var deployPinsTOML []byte
 
 // DeployPin is one row of the canonical deploy-ledger table. DeployLedger is a
@@ -30,7 +30,7 @@ func init() {
 	if err := toml.Unmarshal(deployPinsTOML, &file); err != nil {
 		// Embedded canonical data must always parse; a failure is a build-time
 		// data bug, not a runtime condition to recover from.
-		panic(fmt.Sprintf("blend: parse deploy_pins.toml: %v", err))
+		panic(fmt.Sprintf("blend: parse deployments.toml: %v", err))
 	}
 	deployPins = file.Pin
 }

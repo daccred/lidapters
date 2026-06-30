@@ -1,0 +1,83 @@
+{
+  "_description": "Frozen raw layout of the Blend testnet mock price oracle: each asset price is a temporary contract_data entry keyed by the asset index (scvU128) holding the price as a scvI128, with the index->asset mapping and decimals in the contract instance storage. Decoding price / 10^decimals reproduces the lastprice getter for USDC, XLM, wETH and wBTC. Pinned to one current testnet ledger of the standard deploy.",
+  "network": "testnet",
+  "oracle_contract": "CCSXSQDUZLCRIGRWLCYK3F547PLBGSFTUVJRQCIXRO2ZDI3VIZKN3NH2",
+  "pool_contract": "CANNO5MLDIANFGZBIFUAYLY2GZLMJOVQKIGBEGWYWQRCRR3QYKEKJAXU",
+  "ledger_seq": 3356416,
+  "close_time": "2026-06-30T05:17:24.000Z",
+  "captured_at": "2026-06-30T05:17:27.869Z",
+  "oracle_decimals": 7,
+  "storage_model": "price[asset_index] stored as contract_data(durability=temporary, key=scvU128(index), value=scvI128(price)); index->asset and decimals in the contract instance storage",
+  "instance_key_xdr_base64": "AAAABgAAAAGleUB0ysUUGjZYsK2XvPvWE0izpVMYCReLtZGjdUZU3QAAABQAAAAB",
+  "instance_value_xdr_base64": "AAAAEwAAAABmwLh7XrSBvllBddWeZuyamsiUW+D+xOCfbCi/ehcIvgAAAAEAAAAJAAAADwAAAAVhZG1pbgAAAAAAABIAAAAAAAAAAJEc8kGjEcQhTxxE/vb8yfQLC/MTkSeTaZXE97BN7AQvAAAADwAAAAZhc3NldHMAAAAAABAAAAABAAAABAAAABAAAAABAAAAAgAAAA8AAAAHU3RlbGxhcgAAAAASAAAAAbDNzeM0HDK4WnQG0fhfko7tzsPfxYbvqPK95Lu33KgGAAAAEAAAAAEAAAACAAAADwAAAAdTdGVsbGFyAAAAABIAAAAB15KLcsJwPM/q9+uf9O9NUEpVqLl5/JtFDqLIQrTRzmEAAAAQAAAAAQAAAAIAAAAPAAAAB1N0ZWxsYXIAAAAAEgAAAAHfMWVlce5LttP7a/PiYAJylKv8BspDpZhPVXpGn8BEggAAABAAAAABAAAAAgAAAA8AAAAHU3RlbGxhcgAAAAASAAAAAe2yjJ0m5DXStRk0xiVyWJP4bd9MMJHGpYgsLMY1D2M6AAAADwAAAARiYXNlAAAAEAAAAAEAAAACAAAADwAAAAVPdGhlcgAAAAAAAA8AAAADVVNEAAAAAA8AAAAIZGVjaW1hbHMAAAADAAAABwAAAA8AAAADcmVzAAAAAAMAAAEsAAAAEgAAAAGwzc3jNBwyuFp0BtH4X5KO7c7D38WG76jyveS7t9yoBgAAAAMAAAAAAAAAEgAAAAHXkotywnA8z+r365/0701QSlWouXn8m0UOoshCtNHOYQAAAAMAAAABAAAAEgAAAAHfMWVlce5LttP7a/PiYAJylKv8BspDpZhPVXpGn8BEggAAAAMAAAACAAAAEgAAAAHtsoydJuQ10rUZNMYlcliT+G3fTDCRxqWILCzGNQ9jOgAAAAMAAAAD",
+  "index_to_asset": [
+    "CCYM3TPDGQODFOC2OQDND6C7SKHO3TWD37CYN35I6K66JO5X3SUANEHN",
+    "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+    "CDPTCZLFOHXEXNWT7NV7HYTAAJZJJK74A3FEHJMYJ5KXURU7YBCIE74O",
+    "CDW3FDE5E3SDLUVVDE2MMJLSLCJ7Q3O7JQYJDRVFRAWCZRRVB5RTUJGP"
+  ],
+  "index_to_asset_codes": [
+    "USDC",
+    "XLM",
+    "wETH",
+    "wBTC"
+  ],
+  "assets": [
+    {
+      "asset_code": "USDC",
+      "asset_id": "CCYM3TPDGQODFOC2OQDND6C7SKHO3TWD37CYN35I6K66JO5X3SUANEHN",
+      "asset_index": 0,
+      "oracle_price_raw": "10000000",
+      "oracle_decimals": 7,
+      "decoded_price": 1,
+      "lastprice_getter": 1,
+      "lastprice_expected": 1,
+      "decode_vs_getter_abs_diff": 0,
+      "decode_vs_expected_abs_diff": 0,
+      "stored_key_xdr_base64": "AAAACQAAAAAAAAAAAAAAAAAAAAA=",
+      "stored_value_xdr_base64": "AAAACgAAAAAAAAAAAAAAAACYloA="
+    },
+    {
+      "asset_code": "XLM",
+      "asset_id": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "asset_index": 1,
+      "oracle_price_raw": "4200000",
+      "oracle_decimals": 7,
+      "decoded_price": 0.42,
+      "lastprice_getter": 0.42,
+      "lastprice_expected": 0.42,
+      "decode_vs_getter_abs_diff": 0,
+      "decode_vs_expected_abs_diff": 0,
+      "stored_key_xdr_base64": "AAAACQAAAAAAAAAAAAAAAAAAAAE=",
+      "stored_value_xdr_base64": "AAAACgAAAAAAAAAAAAAAAABAFkA="
+    },
+    {
+      "asset_code": "wETH",
+      "asset_id": "CDPTCZLFOHXEXNWT7NV7HYTAAJZJJK74A3FEHJMYJ5KXURU7YBCIE74O",
+      "asset_index": 2,
+      "oracle_price_raw": "40000000000",
+      "oracle_decimals": 7,
+      "decoded_price": 4000,
+      "lastprice_getter": 4000,
+      "lastprice_expected": 4000,
+      "decode_vs_getter_abs_diff": 0,
+      "decode_vs_expected_abs_diff": 0,
+      "stored_key_xdr_base64": "AAAACQAAAAAAAAAAAAAAAAAAAAI=",
+      "stored_value_xdr_base64": "AAAACgAAAAAAAAAAAAAACVAvkAA="
+    },
+    {
+      "asset_code": "wBTC",
+      "asset_id": "CDW3FDE5E3SDLUVVDE2MMJLSLCJ7Q3O7JQYJDRVFRAWCZRRVB5RTUJGP",
+      "asset_index": 3,
+      "oracle_price_raw": "1000000000000",
+      "oracle_decimals": 7,
+      "decoded_price": 100000,
+      "lastprice_getter": 100000,
+      "lastprice_expected": 100000,
+      "decode_vs_getter_abs_diff": 0,
+      "decode_vs_expected_abs_diff": 0,
+      "stored_key_xdr_base64": "AAAACQAAAAAAAAAAAAAAAAAAAAM=",
+      "stored_value_xdr_base64": "AAAACgAAAAAAAAAAAAAA6NSlEAA="
+    }
+  ]
+}

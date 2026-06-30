@@ -13,6 +13,7 @@ package blend
 
 import (
 	"encoding/json"
+	"math/big"
 	"sort"
 	"strconv"
 	"time"
@@ -70,7 +71,24 @@ type blendStateBuilder struct {
 	pendingPos    map[string]pendingUserPositions
 	backstopPools map[string]backstopPoolBalance
 	backstopUsers map[string]backstopUserBalance
-	deltas        []typedStateDelta
+	oracles       map[string]*oracleBuilder
+	// owned is the adapter's owned-contract set, threaded in so the reducer can
+	// tell an oracle's contract_data apart from a pool's. It is read-only config,
+	// not per-ledger scratch, so it does not break the run-twice purity guarantee.
+	owned  map[string]struct{}
+	deltas []typedStateDelta
+}
+
+// oracleBuilder accumulates the parts of a Blend price oracle that a fold needs
+// to resolve a reserve's USD price: the oracle's asset->index map and the raw
+// per-index price, both decoded from the oracle's own contract_data. Price
+// entries are keyed by the asset's index, so the index->asset map (which the
+// oracle keeps in its instance storage) is what ties a stored price back to a
+// pool reserve.
+type oracleBuilder struct {
+	decimals     int32
+	assetToIndex map[string]int64
+	priceByIndex map[int64]string
 }
 
 type poolBuilder struct {
@@ -111,6 +129,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 		pendingPos:    map[string]pendingUserPositions{},
 		backstopPools: map[string]backstopPoolBalance{},
 		backstopUsers: map[string]backstopUserBalance{},
+		oracles:       map[string]*oracleBuilder{},
 	}
 }
 
@@ -120,6 +139,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 // built state plus the silver-debug deltas.
 func (a *Adapter) decodeBlendState(prior *contractsv1.LedgerState, changes []contractsv1.ContractDataChange, ledgerSeq int64) (contractsv1.LedgerState, []typedStateDelta) {
 	b := newBlendStateBuilder()
+	b.owned = a.contracts
 	if prior != nil {
 		b.loadPrior(prior)
 	}
@@ -196,6 +216,12 @@ func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
 // build assembles the typed LedgerState from the mirror, sorting every slice so
 // the output is byte-identical when the same input is folded twice.
 func (b *blendStateBuilder) build() contractsv1.LedgerState {
+	// Thread decoded oracle prices onto their reserves before the slices are
+	// finalized and sorted, so the price rides on the already-deterministic
+	// reserve ordering (finalizePoolReserves + sortLedgerState) and the run-twice
+	// output stays byte-identical.
+	b.resolveOraclePrices()
+
 	pools := make([]contractsv1.PoolState, 0, len(b.pools))
 	users := make([]contractsv1.UserReservePosition, 0)
 	pending := make([]contractsv1.PendingUserPosition, 0, len(b.pendingPos))
@@ -264,6 +290,21 @@ func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerS
 	value, ok := decodeScValBase64(*change.ValueXDR)
 	if !ok {
 		return
+	}
+
+	// A registered price oracle stores two kinds of entries we care about: its
+	// contract instance (whose storage carries the ordered asset list and the
+	// shared price decimals) and one temporary entry per asset holding the raw
+	// price, keyed by the asset's index. Decode those here, ahead of the generic
+	// contract-instance handling, so an oracle is never mistaken for a pool.
+	if _, owned := b.owned[change.ContractID]; owned {
+		if b.applyOracleInstance(change.ContractID, value) {
+			return
+		}
+		if isOraclePriceKey(key) {
+			b.applyOraclePrice(change.ContractID, key, value)
+			return
+		}
 	}
 
 	if wasmHash, ok := contractInstanceWasmHash(value); ok {
@@ -351,6 +392,18 @@ func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerS
 }
 
 func (b *blendStateBuilder) applyDelete(change contractsv1.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
+	if _, owned := b.owned[change.ContractID]; owned && isOraclePriceKey(key) {
+		// A price entry is temporary storage: once it is evicted or its TTL lapses
+		// the price is gone on-chain, so drop it here too. This is the storage-level
+		// form of the contract's reject-stale-price rule — a price that is no longer
+		// live leaves the reserve without one, surfaced downstream as unavailable.
+		if index, ok := scInt64(key); ok {
+			if oracle := b.oracles[change.ContractID]; oracle != nil {
+				delete(oracle.priceByIndex, index)
+			}
+		}
+		return
+	}
 	if sym, ok := scSymbol(key); ok {
 		if sym == "Config" || sym == "ResList" {
 			delete(b.pools, change.ContractID)
@@ -660,6 +713,132 @@ func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
 	if dSupply, ok := fieldIntString(fields, "d_supply"); ok {
 		reserve.state.DSupplyRaw = dSupply
 	}
+}
+
+func (b *blendStateBuilder) ensureOracle(oracleID string) *oracleBuilder {
+	oracle, ok := b.oracles[oracleID]
+	if !ok {
+		oracle = &oracleBuilder{
+			assetToIndex: map[string]int64{},
+			priceByIndex: map[int64]string{},
+		}
+		b.oracles[oracleID] = oracle
+	}
+	return oracle
+}
+
+// isOraclePriceKey reports whether a contract_data key is a price entry's key.
+// The oracle keys each asset's price by the asset's index as a u128; no pool or
+// backstop entry uses a bare u128 key, so this is an unambiguous discriminator.
+func isOraclePriceKey(key xdr.ScVal) bool {
+	return key.Type == xdr.ScValTypeScvU128
+}
+
+// applyOracleInstance decodes a price oracle's contract instance. Its storage
+// holds the ordered asset list (asset -> index) and the shared price decimals.
+// It returns true only when the instance actually looks like an oracle (it
+// carries both an asset list and a decimals entry), so a pool's contract
+// instance still falls through to the pool-wasm handling.
+func (b *blendStateBuilder) applyOracleInstance(oracleID string, value xdr.ScVal) bool {
+	instance, ok := value.GetInstance()
+	if !ok || instance.Storage == nil {
+		return false
+	}
+	storage := map[string]xdr.ScVal{}
+	for _, entry := range []xdr.ScMapEntry(*instance.Storage) {
+		name, ok := scSymbol(entry.Key)
+		if !ok {
+			continue
+		}
+		storage[name] = entry.Val
+	}
+	assetsVal, hasAssets := storage["assets"]
+	decimals, hasDecimals := scInt32(storage["decimals"])
+	if !hasAssets || !hasDecimals {
+		return false
+	}
+	items, ok := scVec(assetsVal)
+	if !ok {
+		return false
+	}
+	oracle := b.ensureOracle(oracleID)
+	oracle.decimals = decimals
+	assetToIndex := map[string]int64{}
+	for i, item := range items {
+		// Each asset is the SEP-40 Asset::Stellar(address) enum, encoded as a vec
+		// of [symbol, address]; only Stellar assets carry a contract-address price.
+		_, args, ok := scVariant(item)
+		if !ok {
+			continue
+		}
+		asset, ok := variantAddress(args)
+		if !ok {
+			continue
+		}
+		assetToIndex[asset] = int64(i)
+	}
+	oracle.assetToIndex = assetToIndex
+	return true
+}
+
+// applyOraclePrice records one asset's raw oracle price. The entry is keyed by
+// the asset's index (a u128) and holds the price as an i128; resolving it back to
+// a reserve happens at build time, once the asset list is known.
+func (b *blendStateBuilder) applyOraclePrice(oracleID string, key, value xdr.ScVal) {
+	index, ok := scInt64(key)
+	if !ok || index < 0 {
+		return
+	}
+	priceRaw, ok := scIntString(value)
+	if !ok {
+		return
+	}
+	oracle := b.ensureOracle(oracleID)
+	oracle.priceByIndex[index] = priceRaw
+}
+
+// resolveOraclePrices threads each oracle's decoded prices onto the reserves
+// that reference it, matching a reserve to its price by the asset's index in its
+// pool's oracle. A non-positive price is rejected exactly the way the pool
+// contract rejects it on-chain (the price must be greater than zero), leaving the
+// reserve without a price so the downstream USD value and health factor surface
+// as unavailable. An asset not priced in this fold is left untouched, so a
+// price decoded on an earlier ledger carries forward through prior state.
+func (b *blendStateBuilder) resolveOraclePrices() {
+	for _, pool := range b.pools {
+		oracle := b.oracles[pool.state.OracleContract]
+		if oracle == nil {
+			continue
+		}
+		for assetID, reserve := range pool.reserves {
+			index, ok := oracle.assetToIndex[assetID]
+			if !ok {
+				continue
+			}
+			priceRaw, ok := oracle.priceByIndex[index]
+			if !ok {
+				continue
+			}
+			if isPositiveIntString(priceRaw) {
+				reserve.state.OraclePriceRaw = priceRaw
+				reserve.state.OracleDecimals = oracle.decimals
+			} else {
+				reserve.state.OraclePriceRaw = ""
+				reserve.state.OracleDecimals = 0
+			}
+		}
+	}
+}
+
+// isPositiveIntString reports whether a base-10 integer string is greater than
+// zero. The price is widened through big.Int so a 128-bit value can never
+// overflow the comparison.
+func isPositiveIntString(s string) bool {
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return false
+	}
+	return n.Sign() > 0
 }
 
 // finalizePoolReserves rebuilds reserveByIndex from scratch and sorts the pool's

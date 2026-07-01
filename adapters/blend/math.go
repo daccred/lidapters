@@ -76,7 +76,13 @@ type poolSummaryAccumulator struct {
 	hasLiability              bool
 	hasEffectiveCollateral    bool
 	pricePartial              bool
-	aprPartial                bool
+	// dataPartial is set when a held reserve's ResData has not folded yet (a
+	// cold-start config-only reload skips it from valuation). An account with a
+	// data-incomplete pool would compute a health factor from only a subset of its
+	// legs, so its summary is suppressed rather than emitted over good gold; it
+	// self-heals once the reserve's data re-folds from bronze.
+	dataPartial   bool
+	aprPartial    bool
 	netAPYPartial             bool
 	liquidationCollaterals    []liquidationCollateral
 	liquidationPriceScenarios map[string]string
@@ -283,6 +289,11 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		}
 		reserve, ok := reserves[reserveKey(userPos.PoolContractID, userPos.AssetID)]
 		if !ok {
+			// The reserve is not in the valuation map — its ResData has not folded yet
+			// (config-only cold-start reload). Drop this leg AND mark the account's pool
+			// summary data-incomplete so an incomplete health factor is not emitted over
+			// the account's good gold. Self-heals when the reserve's data re-folds.
+			ensurePoolSummary(userPos.Address, userPos.PoolContractID).dataPartial = true
 			continue
 		}
 
@@ -572,6 +583,22 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 
 	for _, address := range addresses {
 		poolsForAddress := poolSummaries[address]
+
+		// Stale-but-safe: if any of the account's pools is data-incomplete (a held
+		// reserve's ResData has not folded after a cold-start config-only reload),
+		// suppress the whole summary so an incomplete health factor never overwrites
+		// the account's good gold snapshot. It re-emits once the data re-folds.
+		dataIncomplete := false
+		for _, pool := range poolsForAddress {
+			if pool.dataPartial {
+				dataIncomplete = true
+				break
+			}
+		}
+		if dataIncomplete {
+			continue
+		}
+
 		protocol := ensureProtocolSummary(address)
 
 		healthFactor := ""

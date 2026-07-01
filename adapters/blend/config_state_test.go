@@ -182,6 +182,84 @@ func TestEmitGuard_ConfigOnlySeedWritesNoValuedRows(t *testing.T) {
 	}
 }
 
+// TestEmitGuard_SuppressesDataIncompleteSummary proves the no-null-overwrite
+// property extends to per-account summaries: after a config-only reload a
+// cross-asset account whose one reserve's ResData has not folded yet is NOT
+// emitted with an incomplete (single-leg) health factor — its summary is withheld
+// so the account's good gold is preserved (stale-but-safe), while the reserve that
+// does have data is still emitted.
+func TestEmitGuard_SuppressesDataIncompleteSummary(t *testing.T) {
+	t.Parallel()
+	layout := loadOracleLayout(t)
+	adapter := newOracleCarryAdapter(t, layout)
+	adapter.RegisterContracts(layout.PoolContract)
+
+	full := oracleSceneChanges(t, layout)
+	fullState, err := adapter.DecodeState(nil, full, layout.LedgerSeq)
+	if err != nil {
+		t.Fatalf("decode full: %v", err)
+	}
+	fullOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq, State: fullState})
+	if err != nil {
+		t.Fatalf("transform full: %v", err)
+	}
+	if len(fullOut.Summaries) == 0 {
+		t.Fatal("baseline: the cross-asset account should have a summary when all reserves have data")
+	}
+
+	// Drop the USDC ResData: the account's USDC liability leg then references a
+	// config-only reserve (no folded data), so its summary must be suppressed.
+	usdc := assetIDByCode(layout, "USDC")
+	partial := dropResDataFor(t, full, usdc)
+	partialState, err := adapter.DecodeState(nil, partial, layout.LedgerSeq)
+	if err != nil {
+		t.Fatalf("decode partial: %v", err)
+	}
+	partialOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq, State: partialState})
+	if err != nil {
+		t.Fatalf("transform partial: %v", err)
+	}
+	if len(partialOut.Summaries) != 0 {
+		t.Fatalf("a data-incomplete account summary must be suppressed, got %d (hf=%q)",
+			len(partialOut.Summaries), partialOut.Summaries[0].HealthFactor)
+	}
+	// The reserve that DOES have data (wBTC) is still emitted; only the config-only
+	// USDC reserve is skipped.
+	sawWBTC, sawUSDC := false, false
+	for _, r := range partialOut.Reserves {
+		switch r.AssetID {
+		case assetIDByCode(layout, "wBTC"):
+			sawWBTC = true
+		case usdc:
+			sawUSDC = true
+		}
+	}
+	if !sawWBTC {
+		t.Fatal("wBTC reserve (data present) must still be emitted")
+	}
+	if sawUSDC {
+		t.Fatal("USDC reserve (config-only, data absent) must be skipped, not emitted at zero")
+	}
+}
+
+// dropResDataFor returns a copy of changes with the ResData entry for assetID
+// removed, leaving that reserve config-only (ResConfig present, ResData absent).
+func dropResDataFor(t *testing.T, changes []contractsv1.ContractDataChange, assetID string) []contractsv1.ContractDataChange {
+	t.Helper()
+	out := make([]contractsv1.ContractDataChange, 0, len(changes))
+	for _, c := range changes {
+		if key, ok := decodeScValBase64(c.KeyXDR); ok {
+			if variant, args, ok := scVariant(key); ok && variant == "ResData" {
+				if a, ok := variantAddress(args); ok && a == assetID {
+					continue
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // ownedChanges filters a change set to the adapter's owned contracts, mirroring

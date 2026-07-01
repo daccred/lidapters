@@ -19,52 +19,63 @@
 #   source         where the value came from
 #   notes          free text
 
-# --- testnet (verified) ----------------------------------------------------
+# --- testnet (verified — exact create_contract ledgers) --------------------
+# The floor MUST be the create_contract ledger: the oracle INSTANCE entry
+# (asset->price-index) is written at deploy and is not re-emitted later. Flooring
+# at the old SHELLBOOK approximation 3294000 would miss that Set on a cold
+# backfill -> null HF/USD. Pin the exact create ledgers instead.
 
 [[pin]]
 network = "testnet"
 contract_id = "CANNO5MLDIANFGZBIFUAYLY2GZLMJOVQKIGBEGWYWQRCRR3QYKEKJAXU"
 role = "pool"
-deploy_ledger = 3294000
-source = "SHELLBOOK.md deploy-bootstrap caveat (verified)"
-notes = "Blend testnet pool, deploy 2026-06-26. 3294000 is the conservative bootstrap floor; raw instance-creation ledger is 3289010 per scratchpad/deploy-ledger."
+deploy_ledger = 3289010
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "Blend testnet pool, deploy 2026-06-26 07:32:58 UTC. Exact create_contract ledger 3289010 (replaces the 3294000 SHELLBOOK bootstrap approximation). Create-ledger is the correct fold floor because the instance entry is written at deploy and never re-emitted."
 
 [[pin]]
 network = "testnet"
 contract_id = "CCSXSQDUZLCRIGRWLCYK3F547PLBGSFTUVJRQCIXRO2ZDI3VIZKN3NH2"
 role = "oracle"
-deploy_ledger = 3294000
-source = "SHELLBOOK.md deploy-bootstrap caveat (verified)"
-notes = "Blend testnet oracle, deploy 2026-06-26. Raw instance-creation ledger is 3288990 per scratchpad/deploy-ledger; 3294000 is the verified bootstrap floor."
+deploy_ledger = 3288990
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "Blend testnet oracle, deploy 2026-06-26 07:31:18 UTC. Exact create_contract ledger 3288990 (replaces the 3294000 SHELLBOOK bootstrap approximation). The oracle instance (asset->index) is written here and not re-emitted at 3294000, so 3288990 is the correct floor to avoid null HF."
 
-# --- public / mainnet (UNCURATED — derive + hand-curate) -------------------
-# deploy_ledger intentionally omitted. Do NOT pin until verified.
-# TODO: derive via scratchpad/deploy-ledger and hand-curate.
+# --- public / mainnet (verified — exact create_contract ledgers) -----------
+# Resolved via scratchpad/deploy-ledger, exact Stellar-Expert close-time match
+# (HIGH). deploy = create_contract ledger = where the oracle INSTANCE entry
+# (asset->index) is written = the correct, safe ingest floor for Cause B.
+# relay.yaml (mainnet, relay repo) does not consume these yet; a future mainnet
+# run config should copy these pins from this canonical table.
 
 [[pin]]
 network = "public"
 contract_id = "CD74A3C54EKUVEGUC6WNTUPOTHB624WFKXN3IYTFJGX3EHXDXHCYMXXR"
 role = "oracle"
-source = ""
-notes = "YieldBloxV2 oracle. TODO: derive via scratchpad/deploy-ledger and hand-curate. Script run 2026-06-30 returned UNRESOLVED (Stellar Expert has no 'created' field) — this one is genuinely hand-roll; MAINNET-BACKFILL-PLAN interpolated approx 56,648,121 (UNVERIFIED, do not pin as-is)."
+deploy_ledger = 56647972
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "YieldBloxV2 oracle, create_contract 2025-04-16 21:55:15 UTC."
 
 [[pin]]
 network = "public"
 contract_id = "CCVTVW2CVA7JLH4ROQGP3CU4T3EXVCK66AZGSM4MUQPXAI4QHCZPOATS"
 role = "oracle"
-source = ""
-notes = "FixedV2 oracle. TODO: derive via scratchpad/deploy-ledger and hand-curate. Script run 2026-06-30 returned candidate 56599006 (MEDIUM confidence, created 2025-04-11 15:39:40 UTC) — verify before pinning."
+deploy_ledger = 56569289
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "FixedV2 oracle, create_contract 2025-04-11 15:39:40 UTC."
 
 [[pin]]
 network = "public"
 contract_id = "CCCCIQSDILITHMM7PBSLVDT5MISSY7R26MNZXCX4H7J5JQ5FPIYOGYFS"
 role = "pool"
-source = ""
-notes = "YieldBloxV2 pool. TODO: derive via scratchpad/deploy-ledger and hand-curate. MAINNET-BACKFILL-PLAN interpolated approx 56,658,268 (UNVERIFIED, do not pin as-is)."
+deploy_ledger = 56658268
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "YieldBloxV2 pool, create_contract 2025-04-17 14:35:16 UTC."
 
 [[pin]]
 network = "public"
 contract_id = "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD"
 role = "pool"
-source = ""
-notes = "FixedV2 pool. TODO: derive via scratchpad/deploy-ledger and hand-curate. MAINNET-BACKFILL-PLAN recorded exact SE ledger approx 56,615,475 (created 2025-04-14 17:46:46 UTC) (UNVERIFIED in this table, confirm before pinning)."
+deploy_ledger = 56615475
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "FixedV2 pool, create_contract 2025-04-14 17:46:46 UTC."

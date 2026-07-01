@@ -11,26 +11,38 @@ func TestDeployPinsParse(t *testing.T) {
 }
 
 func TestDeployPinTestnetResolves(t *testing.T) {
-	const (
-		pool   = "CANNO5MLDIANFGZBIFUAYLY2GZLMJOVQKIGBEGWYWQRCRR3QYKEKJAXU"
-		oracle = "CCSXSQDUZLCRIGRWLCYK3F547PLBGSFTUVJRQCIXRO2ZDI3VIZKN3NH2"
-	)
-	for _, id := range []string{pool, oracle} {
+	// Exact create_contract ledgers (replacing the old 3294000 SHELLBOOK approx).
+	cases := map[string]int64{
+		"CANNO5MLDIANFGZBIFUAYLY2GZLMJOVQKIGBEGWYWQRCRR3QYKEKJAXU": 3289010, // pool
+		"CCSXSQDUZLCRIGRWLCYK3F547PLBGSFTUVJRQCIXRO2ZDI3VIZKN3NH2": 3288990, // oracle
+	}
+	for id, want := range cases {
 		got, ok := DeployLedger("testnet", id)
 		if !ok {
 			t.Fatalf("testnet %s: expected curated pin, got ok=false", id)
 		}
-		if got != 3294000 {
-			t.Fatalf("testnet %s: got deploy ledger %d, want 3294000", id, got)
+		if got != want {
+			t.Fatalf("testnet %s: got deploy ledger %d, want %d", id, got, want)
 		}
 	}
 }
 
-func TestDeployPinMainnetUncurated(t *testing.T) {
-	// YieldBloxV2 oracle row exists but has no deploy_ledger yet -> (0, false).
-	got, ok := DeployLedger("public", "CD74A3C54EKUVEGUC6WNTUPOTHB624WFKXN3IYTFJGX3EHXDXHCYMXXR")
-	if ok || got != 0 {
-		t.Fatalf("uncurated mainnet row: got (%d, %v), want (0, false)", got, ok)
+func TestDeployPinMainnetResolves(t *testing.T) {
+	// All four mainnet pins are now curated (exact create_contract ledgers).
+	cases := map[string]int64{
+		"CD74A3C54EKUVEGUC6WNTUPOTHB624WFKXN3IYTFJGX3EHXDXHCYMXXR": 56647972, // YieldBloxV2 oracle
+		"CCVTVW2CVA7JLH4ROQGP3CU4T3EXVCK66AZGSM4MUQPXAI4QHCZPOATS": 56569289, // FixedV2 oracle
+		"CCCCIQSDILITHMM7PBSLVDT5MISSY7R26MNZXCX4H7J5JQ5FPIYOGYFS": 56658268, // YieldBloxV2 pool
+		"CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD": 56615475, // FixedV2 pool
+	}
+	for id, want := range cases {
+		got, ok := DeployLedger("public", id)
+		if !ok {
+			t.Fatalf("public %s: expected curated pin, got ok=false", id)
+		}
+		if got != want {
+			t.Fatalf("public %s: got deploy ledger %d, want %d", id, got, want)
+		}
 	}
 }
 

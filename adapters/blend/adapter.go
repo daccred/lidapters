@@ -11,6 +11,11 @@ import (
 // state decode (DecodeState, in state.go), and ownership (OwnsContract).
 var _ contractsv1.ProtocolAdapter = (*Adapter)(nil)
 
+// Adapter also owns its low-frequency config across process restarts: it declares
+// the storage schema, emits config records, and rehydrates the seed state. See
+// config_state.go.
+var _ contractsv1.ConfigStateful = (*Adapter)(nil)
+
 type Adapter struct {
 	cfg Config
 	// contracts is the owned contract-ID set OwnsContract checks. It is

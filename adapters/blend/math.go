@@ -151,6 +151,18 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		})
 
 		for _, reserve := range pool.Reserves {
+			// A reserve whose ResData half has not been folded yet — config present
+			// but no b/d rate or supply — is a cold-start artifact: config-only reload
+			// seeds a pool's reserve config (from persisted config) before the bronze
+			// re-fold restores its data. Emitting it here would value it at zero
+			// (mustParseDecimal("") == 0) and overwrite the reserve's good gold. It is
+			// also absent from the valuation map so a position that references it is
+			// left stale-but-safe rather than valued against zeros. Once the reserve's
+			// ResData re-folds from bronze it is emitted normally. A genuinely-zero but
+			// folded reserve keeps its ResData strings ("0"), so it is not skipped.
+			if !reserveHasFoldedData(reserve) {
+				continue
+			}
 			nReserve, err := normalizeReserve(pool.ContractID, nPool, reserve)
 			if err != nil {
 				return err
@@ -785,6 +797,15 @@ func newV2Pool(v2Scalar, backstopTakeRate string) normalizedPool {
 		backstopTakeRaw:       backstopTakeRaw,
 		backstopTakeAvailable: available,
 	}
+}
+
+// reserveHasFoldedData reports whether a reserve's ResData half has been folded
+// from bronze. ResData sets the b/d rate accumulators and the b/d supplies
+// together, so any one being non-empty means data is present. A reserve rebuilt
+// from persisted config alone (cold-start reload) has all four empty until its
+// bronze re-fold; it must not be valued or emitted until then.
+func reserveHasFoldedData(r contractsv1.ReserveState) bool {
+	return r.BRateRaw != "" || r.DRateRaw != "" || r.BSupplyRaw != "" || r.DSupplyRaw != ""
 }
 
 func normalizeReserve(poolContract string, pool normalizedPool, reserve contractsv1.ReserveState) (normalizedReserve, error) {

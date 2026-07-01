@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -17,7 +17,7 @@ var (
 
 type decodedEvent struct {
 	isBlend      bool
-	activityType contractsv1.ActivityType
+	activityType contracts.ActivityType
 	address      string
 	assetID      string
 	amountRaw    string
@@ -27,7 +27,7 @@ type decodedEvent struct {
 	metadata     map[string]string
 }
 
-func decodeEvent(evt contractsv1.RawEventEnvelope) decodedEvent {
+func decodeEvent(evt contracts.RawEventEnvelope) decodedEvent {
 	out := decodedEvent{
 		isBlend:  looksBlend(evt),
 		metadata: map[string]string{"topic": evt.Topic},
@@ -207,7 +207,7 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	}
 }
 
-func looksBlend(evt contractsv1.RawEventEnvelope) bool {
+func looksBlend(evt contracts.RawEventEnvelope) bool {
 	if evt.Metadata["protocol_id"] == "blend" {
 		return true
 	}
@@ -223,37 +223,37 @@ func looksBlend(evt contractsv1.RawEventEnvelope) bool {
 	return false
 }
 
-func classifyEventName(name string) contractsv1.ActivityType {
+func classifyEventName(name string) contracts.ActivityType {
 	s := strings.ToLower(strings.TrimSpace(name))
 	switch {
 	case strings.Contains(s, "supply"), strings.Contains(s, "deposit"):
-		return contractsv1.ActivityTypeDeposit
+		return contracts.ActivityTypeDeposit
 	case strings.Contains(s, "withdraw"):
-		return contractsv1.ActivityTypeWithdraw
+		return contracts.ActivityTypeWithdraw
 	case strings.Contains(s, "borrow"):
-		return contractsv1.ActivityTypeBorrow
+		return contracts.ActivityTypeBorrow
 	case strings.Contains(s, "repay"):
-		return contractsv1.ActivityTypeRepay
+		return contracts.ActivityTypeRepay
 	case strings.Contains(s, "liquid"):
-		return contractsv1.ActivityTypeLiquidation
+		return contracts.ActivityTypeLiquidation
 	case strings.Contains(s, "claim"):
-		return contractsv1.ActivityTypeClaimRewards
+		return contracts.ActivityTypeClaimRewards
 	case strings.Contains(s, "flash"):
-		return contractsv1.ActivityTypeFlashLoan
+		return contracts.ActivityTypeFlashLoan
 	case strings.Contains(s, "bad_debt"), strings.Contains(s, "baddebt"):
-		return contractsv1.ActivityTypeBadDebt
+		return contracts.ActivityTypeBadDebt
 	case strings.Contains(s, "status"), strings.Contains(s, "reserve_config"), strings.Contains(s, "set_reserve"):
-		return contractsv1.ActivityTypeStatusChange
+		return contracts.ActivityTypeStatusChange
 	default:
 		return ""
 	}
 }
 
-func directionForActivity(a contractsv1.ActivityType) string {
+func directionForActivity(a contracts.ActivityType) string {
 	switch a {
-	case contractsv1.ActivityTypeDeposit, contractsv1.ActivityTypeRepay, contractsv1.ActivityTypeClaimRewards:
+	case contracts.ActivityTypeDeposit, contracts.ActivityTypeRepay, contracts.ActivityTypeClaimRewards:
 		return "in"
-	case contractsv1.ActivityTypeWithdraw, contractsv1.ActivityTypeBorrow:
+	case contracts.ActivityTypeWithdraw, contracts.ActivityTypeBorrow:
 		return "out"
 	default:
 		return "neutral"
@@ -265,12 +265,12 @@ func directionForActivity(a contractsv1.ActivityType) string {
 // withdrawals move supply shares; borrows and repays move liability. Activities
 // whose share semantics are not determinable from the type alone (liquidation,
 // claim_rewards, status changes, etc.) return "" so the store can COALESCE.
-func shareTypeForActivity(a contractsv1.ActivityType) string {
+func shareTypeForActivity(a contracts.ActivityType) string {
 	switch a {
-	case contractsv1.ActivityTypeDeposit, contractsv1.ActivityTypeWithdraw:
-		return string(contractsv1.PositionTypeSupply)
-	case contractsv1.ActivityTypeBorrow, contractsv1.ActivityTypeRepay:
-		return string(contractsv1.PositionTypeLiability)
+	case contracts.ActivityTypeDeposit, contracts.ActivityTypeWithdraw:
+		return string(contracts.PositionTypeSupply)
+	case contracts.ActivityTypeBorrow, contracts.ActivityTypeRepay:
+		return string(contracts.PositionTypeLiability)
 	default:
 		return ""
 	}

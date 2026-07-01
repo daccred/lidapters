@@ -1,11 +1,11 @@
-package blend
+package lidapters
 
 import (
 	"encoding/json"
 	"testing"
 	"time"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 )
 
 func TestV2RateModifierScaleAndUtilizationClamp(t *testing.T) {
@@ -16,15 +16,15 @@ func TestV2RateModifierScaleAndUtilizationClamp(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 1,
 		CloseTime: time.Unix(0, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
 				BackstopTakeRate: "0",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:         "CASSET",
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
@@ -71,16 +71,16 @@ func TestPoolIsolatedWorstSummarySemantics(t *testing.T) {
 	}
 
 	address := "GUSER"
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 2,
 		CloseTime: time.Unix(10, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{
 				{
 					ContractID:       "CPOOLA",
 					WasmHash:         "wasm-v2",
 					BackstopTakeRate: "0",
-					Reserves: []contractsv1.ReserveState{{
+					Reserves: []contracts.ReserveState{{
 						AssetID:         "CASSETA",
 						AssetDecimals:   7,
 						BRateRaw:        "1000000000000",
@@ -105,7 +105,7 @@ func TestPoolIsolatedWorstSummarySemantics(t *testing.T) {
 					ContractID:       "CPOOLB",
 					WasmHash:         "wasm-v2",
 					BackstopTakeRate: "0",
-					Reserves: []contractsv1.ReserveState{{
+					Reserves: []contracts.ReserveState{{
 						AssetID:         "CASSETB",
 						AssetDecimals:   7,
 						BRateRaw:        "1000000000000",
@@ -127,9 +127,9 @@ func TestPoolIsolatedWorstSummarySemantics(t *testing.T) {
 					}},
 				},
 			},
-			Users: []contractsv1.UserReservePosition{
-				{Address: address, PoolContractID: "CPOOLA", AssetID: "CASSETA", PositionType: contractsv1.PositionTypeCollateral, BTokensRaw: "10000000000"},
-				{Address: address, PoolContractID: "CPOOLB", AssetID: "CASSETB", PositionType: contractsv1.PositionTypeLiability, DTokensRaw: "1000000000"},
+			Users: []contracts.UserReservePosition{
+				{Address: address, PoolContractID: "CPOOLA", AssetID: "CASSETA", PositionType: contracts.PositionTypeCollateral, BTokensRaw: "10000000000"},
+				{Address: address, PoolContractID: "CPOOLB", AssetID: "CASSETB", PositionType: contracts.PositionTypeLiability, DTokensRaw: "1000000000"},
 			},
 		},
 	})
@@ -177,21 +177,21 @@ func TestBackstopShareAndTokenAccounting(t *testing.T) {
 	}
 
 	unlockAt := time.Unix(2000, 0).UTC()
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 3,
 		CloseTime: time.Unix(20, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID: "CPOOL",
 				WasmHash:   "wasm-v2",
 			}},
-			Backstops: []contractsv1.BackstopPosition{{
+			Backstops: []contracts.BackstopPosition{{
 				Address:              "GBACKSTOP",
 				PoolContractID:       "CPOOL",
 				UserSharesRaw:        "300",
 				PoolSharesRaw:        "8000",
 				PoolTokensRaw:        "10000",
-				Q4W:                  []contractsv1.Q4WEntry{{SharesRaw: "100", UnlockAt: unlockAt}},
+				Q4W:                  []contracts.Q4WEntry{{SharesRaw: "100", UnlockAt: unlockAt}},
 				LPTokenSupplyRaw:     "10000",
 				LPBLNDReserveRaw:     "20000",
 				LPUSDCReserveRaw:     "30000",
@@ -208,9 +208,9 @@ func TestBackstopShareAndTokenAccounting(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	var backstop *contractsv1.Position
+	var backstop *contracts.Position
 	for i := range out.Positions {
-		if out.Positions[i].PositionType == contractsv1.PositionTypeBackstop {
+		if out.Positions[i].PositionType == contracts.PositionTypeBackstop {
 			backstop = &out.Positions[i]
 			break
 		}
@@ -249,15 +249,15 @@ func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 4,
 		CloseTime: time.Unix(30, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
 				BackstopTakeRate: "0",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:            "CASSET",
 					AssetDecimals:      7,
 					BRateRaw:           "1000000000000",
@@ -280,9 +280,9 @@ func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 					BorrowEmissionsAPR: "0.005",
 				}},
 			}},
-			Users: []contractsv1.UserReservePosition{
-				{Address: "GAPR", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeSupply, BTokensRaw: "10000000"},
-				{Address: "GAPR", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeLiability, DTokensRaw: "10000000"},
+			Users: []contracts.UserReservePosition{
+				{Address: "GAPR", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeSupply, BTokensRaw: "10000000"},
+				{Address: "GAPR", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeLiability, DTokensRaw: "10000000"},
 			},
 		},
 	})
@@ -290,7 +290,7 @@ func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	supply := findPosition(out, contractsv1.PositionTypeSupply)
+	supply := findPosition(out, contracts.PositionTypeSupply)
 	if supply == nil {
 		t.Fatalf("expected supply position")
 	}
@@ -301,7 +301,7 @@ func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 		t.Fatalf("expected net_supply_apr metadata")
 	}
 
-	liability := findPosition(out, contractsv1.PositionTypeLiability)
+	liability := findPosition(out, contracts.PositionTypeLiability)
 	if liability == nil {
 		t.Fatalf("expected liability position")
 	}
@@ -321,15 +321,15 @@ func TestReservePositionAPRMissingEmissionsStaysPartial(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 5,
 		CloseTime: time.Unix(40, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
 				BackstopTakeRate: "0",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:         "CASSET",
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
@@ -350,15 +350,15 @@ func TestReservePositionAPRMissingEmissionsStaysPartial(t *testing.T) {
 					OracleDecimals:  8,
 				}},
 			}},
-			Users: []contractsv1.UserReservePosition{
-				{Address: "GPARTIAL", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeSupply, BTokensRaw: "10000000"},
+			Users: []contracts.UserReservePosition{
+				{Address: "GPARTIAL", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeSupply, BTokensRaw: "10000000"},
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("transform: %v", err)
 	}
-	supply := findPosition(out, contractsv1.PositionTypeSupply)
+	supply := findPosition(out, contracts.PositionTypeSupply)
 	if supply == nil {
 		t.Fatalf("expected supply position")
 	}
@@ -381,15 +381,15 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 	// UtilTargetRaw == 0 with non-zero utilization makes the borrow (and hence
 	// supply) base APR invalid, so apr stays partial; but the raw emissions APRs
 	// parse and must be surfaced independently into metadata.
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 6,
 		CloseTime: time.Unix(50, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
 				BackstopTakeRate: "0",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:            "CASSET",
 					AssetDecimals:      7,
 					BRateRaw:           "1000000000000",
@@ -412,9 +412,9 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 					BorrowEmissionsAPR: "0.005",
 				}},
 			}},
-			Users: []contractsv1.UserReservePosition{
-				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeSupply, BTokensRaw: "10000000"},
-				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeLiability, DTokensRaw: "10000000"},
+			Users: []contracts.UserReservePosition{
+				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeSupply, BTokensRaw: "10000000"},
+				{Address: "GEMIT", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeLiability, DTokensRaw: "10000000"},
 			},
 		},
 	})
@@ -422,7 +422,7 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	supply := findPosition(out, contractsv1.PositionTypeSupply)
+	supply := findPosition(out, contracts.PositionTypeSupply)
 	if supply == nil {
 		t.Fatalf("expected supply position")
 	}
@@ -439,7 +439,7 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 		t.Fatalf("expected no net_supply_apr when base APR invalid, got %q", supply.Metadata["net_supply_apr"])
 	}
 
-	liability := findPosition(out, contractsv1.PositionTypeLiability)
+	liability := findPosition(out, contracts.PositionTypeLiability)
 	if liability == nil {
 		t.Fatalf("expected liability position")
 	}
@@ -474,10 +474,10 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 		"asset":  assetID,
 	})
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 6,
 		CloseTime: time.Unix(50, 0).UTC(),
-		Events: []contractsv1.RawEventEnvelope{{
+		Events: []contracts.RawEventEnvelope{{
 			LedgerSeq:  6,
 			TxHash:     "tx-activity-price",
 			EventIndex: 0,
@@ -490,11 +490,11 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 				"asset_decimals":         "7",
 			},
 		}},
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID: poolID,
 				WasmHash:   "wasm-v2",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:         assetID,
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
@@ -547,10 +547,10 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 		"asset":  assetID,
 	})
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 7,
 		CloseTime: time.Unix(60, 0).UTC(),
-		Events: []contractsv1.RawEventEnvelope{{
+		Events: []contracts.RawEventEnvelope{{
 			LedgerSeq:  7,
 			TxHash:     "tx-activity-no-price",
 			EventIndex: 0,
@@ -559,11 +559,11 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 			RawEvent:   raw,
 			CloseTime:  time.Unix(60, 0).UTC(),
 		}},
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID: poolID,
 				WasmHash:   "wasm-v2",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:         assetID,
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
@@ -607,15 +607,15 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contractsv1.TransformInput{
+	out, err := adapter.Transform(contracts.TransformInput{
 		LedgerSeq: 8,
 		CloseTime: time.Unix(70, 0).UTC(),
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
 				BackstopTakeRate: "0",
-				Reserves: []contractsv1.ReserveState{{
+				Reserves: []contracts.ReserveState{{
 					AssetID:         "CASSET",
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
@@ -636,9 +636,9 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 					OracleDecimals:  8,
 				}},
 			}},
-			Users: []contractsv1.UserReservePosition{
-				{Address: "GLIQ", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeCollateral, BTokensRaw: "1000000000"},
-				{Address: "GLIQ", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contractsv1.PositionTypeLiability, DTokensRaw: "500000000"},
+			Users: []contracts.UserReservePosition{
+				{Address: "GLIQ", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeCollateral, BTokensRaw: "1000000000"},
+				{Address: "GLIQ", PoolContractID: "CPOOL", AssetID: "CASSET", PositionType: contracts.PositionTypeLiability, DTokensRaw: "500000000"},
 			},
 		},
 	})
@@ -665,7 +665,7 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 	}
 }
 
-func findPosition(output *contractsv1.TransformOutput, positionType contractsv1.PositionType) *contractsv1.Position {
+func findPosition(output *contracts.TransformOutput, positionType contracts.PositionType) *contracts.Position {
 	for i := range output.Positions {
 		if output.Positions[i].PositionType == positionType {
 			return &output.Positions[i]

@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/shopspring/decimal"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -17,12 +17,12 @@ import (
 // representativeChanges builds a contract_data change set covering pools,
 // reserves, and user positions plus backstop pool/user balances — the shape the
 // run-twice and deltas-sorted determinism gates need to exercise.
-func representativeChanges(t *testing.T) []contractsv1.ContractDataChange {
+func representativeChanges(t *testing.T) []contracts.ContractDataChange {
 	t.Helper()
 	poolID := validContractString(t, 1)
 	backstopID := validContractString(t, 4)
 
-	return []contractsv1.ContractDataChange{
+	return []contracts.ContractDataChange{
 		stateChange(t, poolID, symbolVal(t, "Config"), mapVal(t, map[string]xdr.ScVal{
 			"oracle":     contractAddressVal(t, 3),
 			"bstop_rate": u32Val(1_000_000),
@@ -167,9 +167,9 @@ func TestDecodeState_EvictionTTLRestore(t *testing.T) {
 
 	for _, sc := range scenarios {
 		t.Run(sc.Scenario, func(t *testing.T) {
-			var prior *contractsv1.LedgerState
+			var prior *contracts.LedgerState
 			if sc.Prior {
-				baseline := []contractsv1.ContractDataChange{stateChange(t, poolID, configKey, configValue)}
+				baseline := []contracts.ContractDataChange{stateChange(t, poolID, configKey, configValue)}
 				built, err := adapter.DecodeState(nil, baseline, 100)
 				if err != nil {
 					t.Fatalf("build prior: %v", err)
@@ -186,7 +186,7 @@ func TestDecodeState_EvictionTTLRestore(t *testing.T) {
 			}
 			change := stateChange(t, poolID, configKey, configValue, opts...)
 
-			next, err := adapter.DecodeState(prior, []contractsv1.ContractDataChange{change}, sc.LedgerSeq)
+			next, err := adapter.DecodeState(prior, []contracts.ContractDataChange{change}, sc.LedgerSeq)
 			if err != nil {
 				t.Fatalf("decode %s: %v", sc.Scenario, err)
 			}
@@ -197,7 +197,7 @@ func TestDecodeState_EvictionTTLRestore(t *testing.T) {
 	}
 }
 
-func hasPool(state *contractsv1.LedgerState, contractID string) bool {
+func hasPool(state *contracts.LedgerState, contractID string) bool {
 	for _, pool := range state.Pools {
 		if pool.ContractID == contractID {
 			return true
@@ -232,21 +232,21 @@ func newTestAdapter(t *testing.T) *Adapter {
 
 // --- contract_data change builders (state-decode test flavor) --------------
 
-type changeOpt func(*contractsv1.ContractDataChange)
+type changeOpt func(*contracts.ContractDataChange)
 
 func withLive(live bool) changeOpt {
-	return func(c *contractsv1.ContractDataChange) { c.Live = live }
+	return func(c *contracts.ContractDataChange) { c.Live = live }
 }
 
 func withLiveUntil(seq *uint32) changeOpt {
-	return func(c *contractsv1.ContractDataChange) { c.LiveUntilLedgerSeq = seq }
+	return func(c *contracts.ContractDataChange) { c.LiveUntilLedgerSeq = seq }
 }
 
 func withChangeType(t string) changeOpt {
-	return func(c *contractsv1.ContractDataChange) { c.ChangeType = t }
+	return func(c *contracts.ContractDataChange) { c.ChangeType = t }
 }
 
-func stateChange(t *testing.T, contractID string, key, value xdr.ScVal, opts ...changeOpt) contractsv1.ContractDataChange {
+func stateChange(t *testing.T, contractID string, key, value xdr.ScVal, opts ...changeOpt) contracts.ContractDataChange {
 	t.Helper()
 	keyXDR, err := xdr.MarshalBase64(key)
 	if err != nil {
@@ -256,7 +256,7 @@ func stateChange(t *testing.T, contractID string, key, value xdr.ScVal, opts ...
 	if err != nil {
 		t.Fatalf("marshal value: %v", err)
 	}
-	change := contractsv1.ContractDataChange{
+	change := contracts.ContractDataChange{
 		ContractID: contractID,
 		KeyXDR:     keyXDR,
 		Durability: "persistent",
@@ -423,7 +423,7 @@ func TestOraclePriceDecode(t *testing.T) {
 			t.Fatalf("decode: %v", err)
 		}
 
-		out, err := adapter.Transform(contractsv1.TransformInput{
+		out, err := adapter.Transform(contracts.TransformInput{
 			LedgerSeq: layout.LedgerSeq,
 			CloseTime: time.Unix(1, 0).UTC(),
 			State:     state,
@@ -465,12 +465,12 @@ func loadOracleLayout(t *testing.T) oracleLayout {
 // resolve), a cross-asset user (wBTC collateral / USDC borrow, so health
 // depends on the wBTC price), the oracle's frozen instance entry, and the four
 // frozen per-asset price entries.
-func oracleSceneChanges(t *testing.T, l oracleLayout) []contractsv1.ContractDataChange {
+func oracleSceneChanges(t *testing.T, l oracleLayout) []contracts.ContractDataChange {
 	t.Helper()
 	poolID := l.PoolContract
 	oracleID := l.OracleContract
 
-	reserveConfig := func(code string, index uint32) contractsv1.ContractDataChange {
+	reserveConfig := func(code string, index uint32) contracts.ContractDataChange {
 		return stateChange(t, poolID, variantVal(t, "ResConfig", addressVal(t, assetIDByCode(l, code))), mapVal(t, map[string]xdr.ScVal{
 			"index":    u32Val(index),
 			"decimals": u32Val(7),
@@ -481,7 +481,7 @@ func oracleSceneChanges(t *testing.T, l oracleLayout) []contractsv1.ContractData
 
 	instanceKey := xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance}
 
-	changes := []contractsv1.ContractDataChange{
+	changes := []contracts.ContractDataChange{
 		stateChange(t, poolID, symbolVal(t, "Config"), mapVal(t, map[string]xdr.ScVal{
 			"oracle":     addressVal(t, oracleID),
 			"bstop_rate": u32Val(1_000_000),
@@ -519,7 +519,7 @@ func oracleSceneChanges(t *testing.T, l oracleLayout) []contractsv1.ContractData
 	return changes
 }
 
-func setPriceValue(t *testing.T, changes []contractsv1.ContractDataChange, l oracleLayout, code string, value xdr.ScVal) {
+func setPriceValue(t *testing.T, changes []contracts.ContractDataChange, l oracleLayout, code string, value xdr.ScVal) {
 	t.Helper()
 	encoded, err := xdr.MarshalBase64(value)
 	if err != nil {
@@ -528,13 +528,13 @@ func setPriceValue(t *testing.T, changes []contractsv1.ContractDataChange, l ora
 	changes[priceChangeIndex(t, changes, l, code)].ValueXDR = &encoded
 }
 
-func setPriceLiveUntil(t *testing.T, changes []contractsv1.ContractDataChange, l oracleLayout, code string, liveUntil uint32) {
+func setPriceLiveUntil(t *testing.T, changes []contracts.ContractDataChange, l oracleLayout, code string, liveUntil uint32) {
 	t.Helper()
 	lu := liveUntil
 	changes[priceChangeIndex(t, changes, l, code)].LiveUntilLedgerSeq = &lu
 }
 
-func priceChangeIndex(t *testing.T, changes []contractsv1.ContractDataChange, l oracleLayout, code string) int {
+func priceChangeIndex(t *testing.T, changes []contracts.ContractDataChange, l oracleLayout, code string) int {
 	t.Helper()
 	key := keyXDRByCode(t, l, code)
 	for i := range changes {
@@ -575,7 +575,7 @@ func assetIDByCode(l oracleLayout, code string) string {
 	return ""
 }
 
-func findReserve(t *testing.T, state *contractsv1.LedgerState, poolID, assetID string) contractsv1.ReserveState {
+func findReserve(t *testing.T, state *contracts.LedgerState, poolID, assetID string) contracts.ReserveState {
 	t.Helper()
 	for _, pool := range state.Pools {
 		if pool.ContractID != poolID {
@@ -588,10 +588,10 @@ func findReserve(t *testing.T, state *contractsv1.LedgerState, poolID, assetID s
 		}
 	}
 	t.Fatalf("reserve %s not found in pool %s", assetID, poolID)
-	return contractsv1.ReserveState{}
+	return contracts.ReserveState{}
 }
 
-func hasPricedPosition(out *contractsv1.TransformOutput) bool {
+func hasPricedPosition(out *contracts.TransformOutput) bool {
 	for _, pos := range out.Positions {
 		if pos.USDValue != "" {
 			return true

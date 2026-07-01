@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	_ "embed"

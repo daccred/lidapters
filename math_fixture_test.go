@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	"encoding/json"
@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/shopspring/decimal"
 )
 
 type mathFixture struct {
 	Name   string                     `json:"name"`
-	Input  contractsv1.TransformInput `json:"input"`
+	Input  contracts.TransformInput `json:"input"`
 	Expect struct {
 		Address                string `json:"address"`
 		DepositedUSD           string `json:"deposited_usd"`
@@ -81,7 +81,7 @@ func loadMathFixtures(t *testing.T, relPath string) []mathFixture {
 	return fixtures
 }
 
-func findSummary(output *contractsv1.TransformOutput, address string) *contractsv1.PositionSummary {
+func findSummary(output *contracts.TransformOutput, address string) *contracts.PositionSummary {
 	for i := range output.Summaries {
 		if output.Summaries[i].Address == address {
 			return &output.Summaries[i]

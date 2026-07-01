@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/shopspring/decimal"
 )
 
@@ -49,14 +49,14 @@ func TestRecordedV2ParitySnapshot(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	input := contractsv1.TransformInput{
+	input := contracts.TransformInput{
 		LedgerSeq: snap.LedgerSeq,
-		State: &contractsv1.LedgerState{
-			Pools: []contractsv1.PoolState{
+		State: &contracts.LedgerState{
+			Pools: []contracts.PoolState{
 				{
 					ContractID: snap.PoolContract,
 					WasmHash:   snap.WasmHash,
-					Reserves: []contractsv1.ReserveState{
+					Reserves: []contracts.ReserveState{
 						{
 							AssetID:         snap.AssetID,
 							AssetDecimals:   snap.AssetDecimals,
@@ -80,19 +80,19 @@ func TestRecordedV2ParitySnapshot(t *testing.T) {
 					},
 				},
 			},
-			Users: []contractsv1.UserReservePosition{
+			Users: []contracts.UserReservePosition{
 				{
 					Address:        snap.Address,
 					PoolContractID: snap.PoolContract,
 					AssetID:        snap.AssetID,
-					PositionType:   contractsv1.PositionTypeCollateral,
+					PositionType:   contracts.PositionTypeCollateral,
 					BTokensRaw:     snap.BTokensRaw,
 				},
 				{
 					Address:        snap.Address,
 					PoolContractID: snap.PoolContract,
 					AssetID:        snap.AssetID,
-					PositionType:   contractsv1.PositionTypeLiability,
+					PositionType:   contracts.PositionTypeLiability,
 					DTokensRaw:     snap.DTokensRaw,
 				},
 			},

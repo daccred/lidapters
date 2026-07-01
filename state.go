@@ -5,11 +5,11 @@
 //
 // DecodeState is a stateless PURE reducer — (prior, changes, ledgerSeq) -> next.
 // The Adapter retains no per-ledger scratch; every carry-over threads through
-// *contractsv1.LedgerState (PendingUserPositions carries the one piece of builder
+// *contracts.LedgerState (PendingUserPositions carries the one piece of builder
 // state that does not otherwise round-trip). Because it keeps no hidden state,
 // folding the same input twice yields byte-identical output, and it cannot leak
 // map-iteration order or wall-clock reads across ledgers.
-package blend
+package lidapters
 
 import (
 	"encoding/json"
@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"time"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -26,7 +26,7 @@ import (
 // a pure reducer: it rebuilds a fresh in-memory mirror from prior, applies
 // changes, and returns the freshly built LedgerState. No DB / network / clock /
 // random / map-order; deterministic and run-twice byte-identical.
-func (a *Adapter) DecodeState(prior *contractsv1.LedgerState, changes []contractsv1.ContractDataChange, ledgerSeq int64) (*contractsv1.LedgerState, error) {
+func (a *Adapter) DecodeState(prior *contracts.LedgerState, changes []contracts.ContractDataChange, ledgerSeq int64) (*contracts.LedgerState, error) {
 	next, _ := a.decodeBlendState(prior, changes, ledgerSeq)
 	return &next, nil
 }
@@ -92,14 +92,14 @@ type oracleBuilder struct {
 }
 
 type poolBuilder struct {
-	state          contractsv1.PoolState
+	state          contracts.PoolState
 	reserves       map[string]*reserveBuilder
 	reserveList    []string
 	reserveByIndex map[int32]string
 }
 
 type reserveBuilder struct {
-	state contractsv1.ReserveState
+	state contracts.ReserveState
 }
 
 type pendingUserPositions struct {
@@ -120,7 +120,7 @@ type backstopUserBalance struct {
 	poolContract string
 	user         string
 	sharesRaw    string
-	q4w          []contractsv1.Q4WEntry
+	q4w          []contracts.Q4WEntry
 }
 
 func newBlendStateBuilder() *blendStateBuilder {
@@ -137,7 +137,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
 // built state plus the silver-debug deltas.
-func (a *Adapter) decodeBlendState(prior *contractsv1.LedgerState, changes []contractsv1.ContractDataChange, ledgerSeq int64) (contractsv1.LedgerState, []typedStateDelta) {
+func (a *Adapter) decodeBlendState(prior *contracts.LedgerState, changes []contracts.ContractDataChange, ledgerSeq int64) (contracts.LedgerState, []typedStateDelta) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	if prior != nil {
@@ -176,7 +176,7 @@ func (a *Adapter) decodeBlendState(prior *contractsv1.LedgerState, changes []con
 // keeps no state of its own between ledgers. Pools/reserves come from
 // prior.Pools, backstop balances from prior.Backstops, and raw user-position
 // blobs from prior.PendingUserPositions.
-func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
+func (b *blendStateBuilder) loadPrior(prior *contracts.LedgerState) {
 	for _, pool := range prior.Pools {
 		pb := ensurePool(b.pools, pool.ContractID)
 		pb.state = pool
@@ -228,17 +228,17 @@ func (b *blendStateBuilder) loadPrior(prior *contractsv1.LedgerState) {
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
 // the output is byte-identical when the same input is folded twice.
-func (b *blendStateBuilder) build() contractsv1.LedgerState {
+func (b *blendStateBuilder) build() contracts.LedgerState {
 	// Thread decoded oracle prices onto their reserves before the slices are
 	// finalized and sorted, so the price rides on the already-deterministic
 	// reserve ordering (finalizePoolReserves + sortLedgerState) and the run-twice
 	// output stays byte-identical.
 	b.resolveOraclePrices()
 
-	pools := make([]contractsv1.PoolState, 0, len(b.pools))
-	users := make([]contractsv1.UserReservePosition, 0)
-	pending := make([]contractsv1.PendingUserPosition, 0, len(b.pendingPos))
-	backstops := make([]contractsv1.BackstopPosition, 0, len(b.backstopUsers))
+	pools := make([]contracts.PoolState, 0, len(b.pools))
+	users := make([]contracts.UserReservePosition, 0)
+	pending := make([]contracts.PendingUserPosition, 0, len(b.pendingPos))
+	backstops := make([]contracts.BackstopPosition, 0, len(b.backstopUsers))
 
 	for _, pool := range b.pools {
 		finalizePoolReserves(pool)
@@ -247,7 +247,7 @@ func (b *blendStateBuilder) build() contractsv1.LedgerState {
 	for _, p := range b.pendingPos {
 		// Raw blob round-trips regardless of whether the pool is known yet, so a
 		// position decoded before its pool appears is not lost.
-		pending = append(pending, contractsv1.PendingUserPosition{
+		pending = append(pending, contracts.PendingUserPosition{
 			Address:        p.user,
 			PoolContractID: p.poolContract,
 			PositionsXDR:   p.valueXDR,
@@ -271,7 +271,7 @@ func (b *blendStateBuilder) build() contractsv1.LedgerState {
 		return pending[i].PoolContractID < pending[j].PoolContractID
 	})
 
-	return contractsv1.LedgerState{
+	return contracts.LedgerState{
 		Pools:                pools,
 		Users:                users,
 		Backstops:            backstops,
@@ -284,15 +284,15 @@ func (b *blendStateBuilder) build() contractsv1.LedgerState {
 // asset->index map, per-index prices) into the returned LedgerState so the next
 // ledger's loadPrior can restore it. Every slice is sorted by a stable key so
 // the run-twice output stays byte-identical.
-func (b *blendStateBuilder) buildOracles() []contractsv1.OracleState {
+func (b *blendStateBuilder) buildOracles() []contracts.OracleState {
 	if len(b.oracles) == 0 {
 		return nil
 	}
-	oracles := make([]contractsv1.OracleState, 0, len(b.oracles))
+	oracles := make([]contracts.OracleState, 0, len(b.oracles))
 	for contractID, oracle := range b.oracles {
-		assets := make([]contractsv1.OracleAssetIndex, 0, len(oracle.assetToIndex))
+		assets := make([]contracts.OracleAssetIndex, 0, len(oracle.assetToIndex))
 		for assetID, index := range oracle.assetToIndex {
-			assets = append(assets, contractsv1.OracleAssetIndex{AssetID: assetID, Index: index})
+			assets = append(assets, contracts.OracleAssetIndex{AssetID: assetID, Index: index})
 		}
 		sort.Slice(assets, func(i, j int) bool {
 			if assets[i].Index != assets[j].Index {
@@ -300,12 +300,12 @@ func (b *blendStateBuilder) buildOracles() []contractsv1.OracleState {
 			}
 			return assets[i].AssetID < assets[j].AssetID
 		})
-		prices := make([]contractsv1.OracleIndexPrice, 0, len(oracle.priceByIndex))
+		prices := make([]contracts.OracleIndexPrice, 0, len(oracle.priceByIndex))
 		for index, priceRaw := range oracle.priceByIndex {
-			prices = append(prices, contractsv1.OracleIndexPrice{Index: index, PriceRaw: priceRaw})
+			prices = append(prices, contracts.OracleIndexPrice{Index: index, PriceRaw: priceRaw})
 		}
 		sort.Slice(prices, func(i, j int) bool { return prices[i].Index < prices[j].Index })
-		oracles = append(oracles, contractsv1.OracleState{
+		oracles = append(oracles, contracts.OracleState{
 			ContractID: contractID,
 			Decimals:   oracle.decimals,
 			Assets:     assets,
@@ -316,7 +316,7 @@ func (b *blendStateBuilder) buildOracles() []contractsv1.OracleState {
 	return oracles
 }
 
-func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerSeq int64) {
+func (b *blendStateBuilder) apply(change contracts.ContractDataChange, ledgerSeq int64) {
 	key, ok := decodeScValBase64(change.KeyXDR)
 	if !ok {
 		return
@@ -441,7 +441,7 @@ func (b *blendStateBuilder) apply(change contractsv1.ContractDataChange, ledgerS
 	}
 }
 
-func (b *blendStateBuilder) applyDelete(change contractsv1.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
+func (b *blendStateBuilder) applyDelete(change contracts.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
 	if _, owned := b.owned[change.ContractID]; owned && isOraclePriceKey(key) {
 		// A price entry is temporary storage: once it is evicted or its TTL lapses
 		// the price is gone on-chain, so drop it here too. This is the storage-level
@@ -550,18 +550,18 @@ func (b *blendStateBuilder) appendUserPositions(pending pendingUserPositions, le
 	b.addDelta(ledgerSeq, "user_positions", typedUserEntityKey(pending.user, pending.poolContract), true, positions)
 }
 
-func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPositions) []contractsv1.UserReservePosition {
+func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPositions) []contracts.UserReservePosition {
 	fields := scMapFields(pending.positions)
-	out := make([]contractsv1.UserReservePosition, 0)
-	out = append(out, positionsFromMap(pool, pending, fields["supply"], contractsv1.PositionTypeSupply)...)
-	out = append(out, positionsFromMap(pool, pending, fields["collateral"], contractsv1.PositionTypeCollateral)...)
-	out = append(out, positionsFromMap(pool, pending, fields["liabilities"], contractsv1.PositionTypeLiability)...)
+	out := make([]contracts.UserReservePosition, 0)
+	out = append(out, positionsFromMap(pool, pending, fields["supply"], contracts.PositionTypeSupply)...)
+	out = append(out, positionsFromMap(pool, pending, fields["collateral"], contracts.PositionTypeCollateral)...)
+	out = append(out, positionsFromMap(pool, pending, fields["liabilities"], contracts.PositionTypeLiability)...)
 	return out
 }
 
-func (b *blendStateBuilder) backstopPosition(userBalance backstopUserBalance) contractsv1.BackstopPosition {
+func (b *blendStateBuilder) backstopPosition(userBalance backstopUserBalance) contracts.BackstopPosition {
 	poolBalance := b.backstopPools[userBalance.poolContract]
-	return contractsv1.BackstopPosition{
+	return contracts.BackstopPosition{
 		Address:              userBalance.user,
 		PoolContractID:       userBalance.poolContract,
 		UserSharesRaw:        userBalance.sharesRaw,
@@ -618,7 +618,7 @@ func typedReserveEntityKey(poolID, assetID string) string { return poolID + "|" 
 func typedUserEntityKey(address, poolID string) string    { return address + "|" + poolID }
 func typedBackstopEntityKey(address, poolID string) string { return address + "|" + poolID }
 
-func sortLedgerState(pools []contractsv1.PoolState, users []contractsv1.UserReservePosition, backstops []contractsv1.BackstopPosition) {
+func sortLedgerState(pools []contracts.PoolState, users []contracts.UserReservePosition, backstops []contracts.BackstopPosition) {
 	sort.Slice(pools, func(i, j int) bool { return pools[i].ContractID < pools[j].ContractID })
 	sort.Slice(users, func(i, j int) bool {
 		if users[i].Address != users[j].Address {
@@ -644,7 +644,7 @@ func ensurePool(pools map[string]*poolBuilder, contractID string) *poolBuilder {
 	pool, ok := pools[contractID]
 	if !ok {
 		pool = &poolBuilder{
-			state: contractsv1.PoolState{
+			state: contracts.PoolState{
 				ContractID: contractID,
 				PoolStatus: "unknown",
 			},
@@ -659,7 +659,7 @@ func ensurePool(pools map[string]*poolBuilder, contractID string) *poolBuilder {
 func ensureReserve(pool *poolBuilder, assetID string) *reserveBuilder {
 	reserve, ok := pool.reserves[assetID]
 	if !ok {
-		reserve = &reserveBuilder{state: contractsv1.ReserveState{AssetID: assetID}}
+		reserve = &reserveBuilder{state: contracts.ReserveState{AssetID: assetID}}
 		pool.reserves[assetID] = reserve
 	}
 	return reserve
@@ -903,7 +903,7 @@ func finalizePoolReserves(pool *poolBuilder) {
 		}
 		pool.reserveByIndex[reserve.state.ReserveIndex] = assetID
 	}
-	reserves := make([]contractsv1.ReserveState, 0, len(pool.reserves))
+	reserves := make([]contracts.ReserveState, 0, len(pool.reserves))
 	for _, reserve := range pool.reserves {
 		reserves = append(reserves, reserve.state)
 	}
@@ -916,12 +916,12 @@ func finalizePoolReserves(pool *poolBuilder) {
 	pool.state.Reserves = reserves
 }
 
-func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr.ScVal, kind contractsv1.PositionType) []contractsv1.UserReservePosition {
+func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr.ScVal, kind contracts.PositionType) []contracts.UserReservePosition {
 	raw, ok := value.GetMap()
 	if !ok || raw == nil {
 		return nil
 	}
-	out := make([]contractsv1.UserReservePosition, 0, len(*raw))
+	out := make([]contracts.UserReservePosition, 0, len(*raw))
 	for _, entry := range *raw {
 		index, ok := scInt32(entry.Key)
 		if !ok {
@@ -935,13 +935,13 @@ func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr
 		if !ok || amount == "0" {
 			continue
 		}
-		pos := contractsv1.UserReservePosition{
+		pos := contracts.UserReservePosition{
 			Address:        pending.user,
 			PoolContractID: pending.poolContract,
 			AssetID:        assetID,
 			PositionType:   kind,
 		}
-		if kind == contractsv1.PositionTypeLiability {
+		if kind == contracts.PositionTypeLiability {
 			pos.DTokensRaw = amount
 		} else {
 			pos.BTokensRaw = amount
@@ -987,7 +987,7 @@ func decodeBackstopUserBalance(poolID, user string, value xdr.ScVal) backstopUse
 		if !ok {
 			continue
 		}
-		balance.q4w = append(balance.q4w, contractsv1.Q4WEntry{
+		balance.q4w = append(balance.q4w, contracts.Q4WEntry{
 			SharesRaw: amount,
 			UnlockAt:  time.Unix(expUnix, 0).UTC(),
 		})

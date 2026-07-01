@@ -1,11 +1,11 @@
-package blend
+package lidapters
 
 import (
 	"bytes"
 	"encoding/json"
 	"testing"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 )
 
 // TestConfigRecords_EmitsLowFrequencyConfigOnly proves the adapter emits one
@@ -159,7 +159,7 @@ func TestEmitGuard_ConfigOnlySeedWritesNoValuedRows(t *testing.T) {
 		t.Fatalf("decode floor: %v", err)
 	}
 	// Sanity: the full floor state DOES value the cross-asset wallet.
-	floorOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq, State: next})
+	floorOut, err := adapter.Transform(contracts.TransformInput{LedgerSeq: layout.LedgerSeq, State: next})
 	if err != nil {
 		t.Fatalf("transform floor: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestEmitGuard_ConfigOnlySeedWritesNoValuedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hydrate: %v", err)
 	}
-	seedOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq + 1, State: seed})
+	seedOut, err := adapter.Transform(contracts.TransformInput{LedgerSeq: layout.LedgerSeq + 1, State: seed})
 	if err != nil {
 		t.Fatalf("transform seed: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestEmitGuard_SuppressesDataIncompleteSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode full: %v", err)
 	}
-	fullOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq, State: fullState})
+	fullOut, err := adapter.Transform(contracts.TransformInput{LedgerSeq: layout.LedgerSeq, State: fullState})
 	if err != nil {
 		t.Fatalf("transform full: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestEmitGuard_SuppressesDataIncompleteSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode partial: %v", err)
 	}
-	partialOut, err := adapter.Transform(contractsv1.TransformInput{LedgerSeq: layout.LedgerSeq, State: partialState})
+	partialOut, err := adapter.Transform(contracts.TransformInput{LedgerSeq: layout.LedgerSeq, State: partialState})
 	if err != nil {
 		t.Fatalf("transform partial: %v", err)
 	}
@@ -246,9 +246,9 @@ func TestEmitGuard_SuppressesDataIncompleteSummary(t *testing.T) {
 
 // dropResDataFor returns a copy of changes with the ResData entry for assetID
 // removed, leaving that reserve config-only (ResConfig present, ResData absent).
-func dropResDataFor(t *testing.T, changes []contractsv1.ContractDataChange, assetID string) []contractsv1.ContractDataChange {
+func dropResDataFor(t *testing.T, changes []contracts.ContractDataChange, assetID string) []contracts.ContractDataChange {
 	t.Helper()
-	out := make([]contractsv1.ContractDataChange, 0, len(changes))
+	out := make([]contracts.ContractDataChange, 0, len(changes))
 	for _, c := range changes {
 		if key, ok := decodeScValBase64(c.KeyXDR); ok {
 			if variant, args, ok := scVariant(key); ok && variant == "ResData" {
@@ -266,8 +266,8 @@ func dropResDataFor(t *testing.T, changes []contractsv1.ContractDataChange, asse
 
 // ownedChanges filters a change set to the adapter's owned contracts, mirroring
 // what the relay projector hands to ConfigRecords.
-func ownedChanges(a *Adapter, changes []contractsv1.ContractDataChange) []contractsv1.ContractDataChange {
-	out := make([]contractsv1.ContractDataChange, 0, len(changes))
+func ownedChanges(a *Adapter, changes []contracts.ContractDataChange) []contracts.ContractDataChange {
+	out := make([]contracts.ContractDataChange, 0, len(changes))
 	for _, c := range changes {
 		if a.OwnsContract(c.ContractID) {
 			out = append(out, c)
@@ -276,7 +276,7 @@ func ownedChanges(a *Adapter, changes []contractsv1.ContractDataChange) []contra
 	return out
 }
 
-func payloadOf(t *testing.T, records []contractsv1.ConfigRecord, kind string) []byte {
+func payloadOf(t *testing.T, records []contracts.ConfigRecord, kind string) []byte {
 	t.Helper()
 	for _, r := range records {
 		if r.Kind == kind {
@@ -287,7 +287,7 @@ func payloadOf(t *testing.T, records []contractsv1.ConfigRecord, kind string) []
 	return nil
 }
 
-func mustUnmarshalKind(t *testing.T, records []contractsv1.ConfigRecord, kind string, dst any) {
+func mustUnmarshalKind(t *testing.T, records []contracts.ConfigRecord, kind string, dst any) {
 	t.Helper()
 	if err := json.Unmarshal(payloadOf(t, records, kind), dst); err != nil {
 		t.Fatalf("unmarshal %s: %v", kind, err)

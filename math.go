@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/shopspring/decimal"
 )
 
@@ -61,7 +61,7 @@ type normalizedReserve struct {
 	supplyAPRNormalized      decimal.Decimal
 	borrowAPRNormalizedValid bool
 	supplyAPRNormalizedValid bool
-	raw                      contractsv1.ReserveState
+	raw                      contracts.ReserveState
 }
 
 type poolSummaryAccumulator struct {
@@ -122,7 +122,7 @@ type poolBreakdownEntry struct {
 	LiquidationPriceScenarios map[string]string `json:"liquidation_price_scenarios,omitempty"`
 }
 
-func (a *Adapter) computeState(input contractsv1.TransformInput, output *contractsv1.TransformOutput) error {
+func (a *Adapter) computeState(input contracts.TransformInput, output *contracts.TransformOutput) error {
 	if input.State == nil {
 		return nil
 	}
@@ -133,7 +133,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		pool, wasmHashSource := a.enrichPoolIdentity(pool)
 		nPool, ok := a.resolvePool(pool)
 		if !ok {
-			output.Quarantine = append(output.Quarantine, contractsv1.QuarantineEvent{
+			output.Quarantine = append(output.Quarantine, contracts.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, "pool", pool.ContractID, "unknown_wasm_hash"),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  input.LedgerSeq,
@@ -146,7 +146,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 			continue
 		}
 		pools[pool.ContractID] = nPool
-		output.Contracts = append(output.Contracts, contractsv1.Contract{
+		output.Contracts = append(output.Contracts, contracts.Contract{
 			ID:              stableID(a.cfg.Protocol, pool.ContractID),
 			Address:         pool.ContractID,
 			Protocol:        a.cfg.Protocol,
@@ -190,7 +190,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				supplyAPY = numString(nReserve.supplyAPRNormalized)
 			}
 
-			output.Reserves = append(output.Reserves, contractsv1.Reserve{
+			output.Reserves = append(output.Reserves, contracts.Reserve{
 				ID:             stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID),
 				Protocol:       a.cfg.Protocol,
 				ContractID:     pool.ContractID,
@@ -304,7 +304,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 
 		share := parseDecimalOrZero(userPos.BTokensRaw)
 		assetAmountRaw := fixedMulFloor(share, reserve.bRateRaw, pool.rateScalar)
-		if userPos.PositionType == contractsv1.PositionTypeLiability {
+		if userPos.PositionType == contracts.PositionTypeLiability {
 			share = parseDecimalOrZero(userPos.DTokensRaw)
 			assetAmountRaw = fixedMulCeil(share, reserve.dRateRaw, pool.rateScalar)
 		}
@@ -330,7 +330,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		apy := ""
 		aprPartial := false
 		signedContribution := decZero
-		if userPos.PositionType == contractsv1.PositionTypeSupply || userPos.PositionType == contractsv1.PositionTypeCollateral {
+		if userPos.PositionType == contracts.PositionTypeSupply || userPos.PositionType == contracts.PositionTypeCollateral {
 			if reserve.supplyAPRNormalizedValid {
 				positionMeta["supply_apr"] = numString(reserve.supplyAPRNormalized)
 			}
@@ -350,7 +350,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 				positionMeta["apr_partial"] = "true"
 				aprPartial = true
 			}
-		} else if userPos.PositionType == contractsv1.PositionTypeLiability {
+		} else if userPos.PositionType == contracts.PositionTypeLiability {
 			if reserve.borrowAPRNormalizedValid {
 				positionMeta["borrow_apr"] = numString(reserve.borrowAPRNormalized)
 			}
@@ -377,12 +377,12 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		if apy != "" && reserve.priceAvailable {
 			r, _ := decimal.NewFromString(apy)
 			signedContribution = usdValue.Mul(r)
-			if userPos.PositionType == contractsv1.PositionTypeLiability {
+			if userPos.PositionType == contracts.PositionTypeLiability {
 				signedContribution = signedContribution.Neg()
 			}
 		}
 
-		pos := contractsv1.Position{
+		pos := contracts.Position{
 			ID:           stableID(a.cfg.Protocol, userPos.Address, userPos.PoolContractID, userPos.AssetID, string(userPos.PositionType)),
 			Address:      userPos.Address,
 			Protocol:     a.cfg.Protocol,
@@ -413,10 +413,10 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		}
 
 		switch userPos.PositionType {
-		case contractsv1.PositionTypeSupply:
+		case contracts.PositionTypeSupply:
 			poolSummary.depositedUSD = poolSummary.depositedUSD.Add(usdValue)
 			protocolSummary.depositedUSD = protocolSummary.depositedUSD.Add(usdValue)
-		case contractsv1.PositionTypeCollateral:
+		case contracts.PositionTypeCollateral:
 			poolSummary.depositedUSD = poolSummary.depositedUSD.Add(usdValue)
 			protocolSummary.depositedUSD = protocolSummary.depositedUSD.Add(usdValue)
 			effectiveCollateralUSD := usdValue.Mul(reserve.cFactorNormalized).Truncate(18)
@@ -430,7 +430,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 					effectiveCollateralUSD: effectiveCollateralUSD,
 				})
 			}
-		case contractsv1.PositionTypeLiability:
+		case contracts.PositionTypeLiability:
 			poolSummary.borrowedUSD = poolSummary.borrowedUSD.Add(usdValue)
 			protocolSummary.borrowedUSD = protocolSummary.borrowedUSD.Add(usdValue)
 			poolSummary.hasLiability = true
@@ -461,12 +461,12 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 
 		activeShares := parseDecimalOrZero(backstop.UserSharesRaw)
 		queuedShares := decZero
-		q4wEntries := make([]contractsv1.BackstopQueueEntry, 0, len(backstop.Q4W))
+		q4wEntries := make([]contracts.BackstopQueueEntry, 0, len(backstop.Q4W))
 		var q4wUnlockAt *time.Time
 		for _, q := range backstop.Q4W {
 			share := parseDecimalOrZero(q.SharesRaw)
 			queuedShares = queuedShares.Add(share)
-			q4wEntries = append(q4wEntries, contractsv1.BackstopQueueEntry{
+			q4wEntries = append(q4wEntries, contracts.BackstopQueueEntry{
 				Amount:   numString(share),
 				UnlockAt: q.UnlockAt.UTC(),
 			})
@@ -543,13 +543,13 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 			metadata["price_unavailable"] = "true"
 		}
 
-		pos := contractsv1.Position{
+		pos := contracts.Position{
 			ID:           stableID(a.cfg.Protocol, backstop.Address, backstop.PoolContractID, "backstop"),
 			Address:      backstop.Address,
 			Protocol:     a.cfg.Protocol,
 			ContractID:   backstop.PoolContractID,
 			AssetID:      "blend_backstop_lp",
-			PositionType: contractsv1.PositionTypeBackstop,
+			PositionType: contracts.PositionTypeBackstop,
 			ShareAmount:  numString(totalShares),
 			AssetAmount:  numString(totalTokens),
 			USDValue:     backstopUSDStr,
@@ -760,7 +760,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 			netAPY = protocol.netAPYNumeratorUSD.Div(protocol.netAPYWeightUSD)
 		}
 
-		output.Summaries = append(output.Summaries, contractsv1.PositionSummary{
+		output.Summaries = append(output.Summaries, contracts.PositionSummary{
 			ID:                     stableID(a.cfg.Protocol, address, "summary"),
 			Address:                address,
 			Protocol:               a.cfg.Protocol,
@@ -784,7 +784,7 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 	return nil
 }
 
-func (a *Adapter) enrichPoolIdentity(pool contractsv1.PoolState) (contractsv1.PoolState, string) {
+func (a *Adapter) enrichPoolIdentity(pool contracts.PoolState) (contracts.PoolState, string) {
 	if strings.TrimSpace(pool.WasmHash) != "" {
 		return pool, "contract_instance"
 	}
@@ -798,7 +798,7 @@ func (a *Adapter) enrichPoolIdentity(pool contractsv1.PoolState) (contractsv1.Po
 	return pool, ""
 }
 
-func poolHasBlendState(pool contractsv1.PoolState) bool {
+func poolHasBlendState(pool contracts.PoolState) bool {
 	if pool.ContractID == "" || len(pool.Reserves) == 0 {
 		return false
 	}
@@ -810,7 +810,7 @@ func poolHasBlendState(pool contractsv1.PoolState) bool {
 	return false
 }
 
-func (a *Adapter) resolvePool(pool contractsv1.PoolState) (normalizedPool, bool) {
+func (a *Adapter) resolvePool(pool contracts.PoolState) (normalizedPool, bool) {
 	if pool.WasmHash == "" {
 		if a.cfg.AllowUnknownV2 {
 			return newV2Pool(a.cfg.V2Scalar, pool.BackstopTakeRate), true
@@ -844,11 +844,11 @@ func newV2Pool(v2Scalar, backstopTakeRate string) normalizedPool {
 // together, so any one being non-empty means data is present. A reserve rebuilt
 // from persisted config alone (cold-start reload) has all four empty until its
 // bronze re-fold; it must not be valued or emitted until then.
-func reserveHasFoldedData(r contractsv1.ReserveState) bool {
+func reserveHasFoldedData(r contracts.ReserveState) bool {
 	return r.BRateRaw != "" || r.DRateRaw != "" || r.BSupplyRaw != "" || r.DSupplyRaw != ""
 }
 
-func normalizeReserve(poolContract string, pool normalizedPool, reserve contractsv1.ReserveState) (normalizedReserve, error) {
+func normalizeReserve(poolContract string, pool normalizedPool, reserve contracts.ReserveState) (normalizedReserve, error) {
 	var out normalizedReserve
 	out.poolContract = poolContract
 	out.assetID = reserve.AssetID

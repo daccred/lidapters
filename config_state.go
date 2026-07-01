@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 // Blend's side of the config-persistence inversion of control. The adapter owns
 // its low-frequency config: it declares the storage schema (ConfigSchema), emits
@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strconv"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -54,26 +54,26 @@ const factorScaleExpr = "1e7"
 // ConfigSchema declares one table per config kind plus the STORED generated
 // columns that expose the jsonb payload to SQL analytics. The host renders the DDL
 // from this and imports none of these Blend field names — they live here.
-func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
-	factor := func(name, jsonKey string) contractsv1.ConfigGeneratedColumn {
-		return contractsv1.ConfigGeneratedColumn{
+func (a *Adapter) ConfigSchema() []contracts.ConfigTableSchema {
+	factor := func(name, jsonKey string) contracts.ConfigGeneratedColumn {
+		return contracts.ConfigGeneratedColumn{
 			Name: name, SQLType: "numeric",
 			Expr: "NULLIF(payload->>'" + jsonKey + "','')::numeric / " + factorScaleExpr,
 		}
 	}
-	return []contractsv1.ConfigTableSchema{
+	return []contracts.ConfigTableSchema{
 		{
 			Kind:  kindOracle,
 			Table: tableOracle,
-			Generated: []contractsv1.ConfigGeneratedColumn{
+			Generated: []contracts.ConfigGeneratedColumn{
 				{Name: "decimals", SQLType: "int", Expr: "NULLIF(payload->>'decimals','')::int"},
 				{Name: "asset_count", SQLType: "int", Expr: "CASE WHEN jsonb_typeof(payload->'assets') = 'array' THEN jsonb_array_length(payload->'assets') ELSE 0 END"},
 			},
-			Indexes: []contractsv1.ConfigIndex{
+			Indexes: []contracts.ConfigIndex{
 				{Name: "idx_blend_oracle_config_decimals", Columns: []string{"decimals"}},
 			},
 			// Per-asset unnest of the oracle's asset->index map for analytics.
-			Views: []contractsv1.ConfigView{{
+			Views: []contracts.ConfigView{{
 				Name: "blend_oracle_asset",
 				Body: "SELECT entity_key AS oracle_id, ledger, removed,\n" +
 					"       (asset->>'asset_id') AS asset_id,\n" +
@@ -87,18 +87,18 @@ func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
 			// on restart: the reload stitches the latest price per index onto the map.
 			Kind:  kindOraclePrice,
 			Table: tableOraclePrice,
-			Generated: []contractsv1.ConfigGeneratedColumn{
+			Generated: []contracts.ConfigGeneratedColumn{
 				{Name: "oracle_id", SQLType: "text", Expr: "payload->>'oracle_id'"},
 				{Name: "asset_index", SQLType: "int", Expr: "NULLIF(payload->>'asset_index','')::int"},
 				{Name: "price_raw", SQLType: "numeric", Expr: "NULLIF(payload->>'price_raw','')::numeric"},
 			},
-			Indexes: []contractsv1.ConfigIndex{
+			Indexes: []contracts.ConfigIndex{
 				{Name: "idx_blend_oracle_price_oracle", Columns: []string{"oracle_id"}},
 				{Name: "idx_blend_oracle_price_index", Columns: []string{"oracle_id", "asset_index"}},
 			},
 			// Price history scaled by the oracle's decimals (a cross-table join, so it
 			// lives in a view rather than a generated column).
-			Views: []contractsv1.ConfigView{{
+			Views: []contracts.ConfigView{{
 				Name: "blend_oracle_price_scaled",
 				Body: "SELECT p.oracle_id, p.asset_index, p.ledger, p.removed, p.price_raw,\n" +
 					"       CASE WHEN o.decimals IS NULL THEN NULL\n" +
@@ -114,13 +114,13 @@ func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
 		{
 			Kind:  kindPool,
 			Table: tablePool,
-			Generated: []contractsv1.ConfigGeneratedColumn{
+			Generated: []contracts.ConfigGeneratedColumn{
 				{Name: "status", SQLType: "text", Expr: "payload->>'status'"},
 				{Name: "backstop_take_rate", SQLType: "numeric", Expr: "NULLIF(payload->>'take_rate','')::numeric / " + factorScaleExpr},
 				{Name: "oracle_ref", SQLType: "text", Expr: "payload->>'oracle'"},
 				{Name: "backstop_ref", SQLType: "text", Expr: "payload->>'backstop'"},
 			},
-			Indexes: []contractsv1.ConfigIndex{
+			Indexes: []contracts.ConfigIndex{
 				{Name: "idx_blend_pool_config_status", Columns: []string{"status"}},
 				{Name: "idx_blend_pool_config_oracle_ref", Columns: []string{"oracle_ref"}},
 			},
@@ -128,7 +128,7 @@ func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
 		{
 			Kind:  kindReserve,
 			Table: tableReserve,
-			Generated: []contractsv1.ConfigGeneratedColumn{
+			Generated: []contracts.ConfigGeneratedColumn{
 				{Name: "pool_id", SQLType: "text", Expr: "payload->>'pool_id'"},
 				{Name: "asset_id", SQLType: "text", Expr: "payload->>'asset_id'"},
 				{Name: "reserve_index", SQLType: "int", Expr: "NULLIF(payload->>'index','')::int"},
@@ -142,7 +142,7 @@ func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
 				factor("r_three", "r_three"),
 				{Name: "supply_cap", SQLType: "numeric", Expr: "NULLIF(payload->>'supply_cap','')::numeric"},
 			},
-			Indexes: []contractsv1.ConfigIndex{
+			Indexes: []contracts.ConfigIndex{
 				{Name: "idx_blend_reserve_config_pool", Columns: []string{"pool_id"}},
 				{Name: "idx_blend_reserve_config_asset", Columns: []string{"asset_id"}},
 			},
@@ -200,15 +200,15 @@ type reserveConfigBody struct {
 // config from the freshly folded next state and serializes it. A removed config
 // key yields a tombstone. Prices, ResData, positions and backstop balances are
 // data, not config, and are never emitted here.
-func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contractsv1.ContractDataChange, ledgerSeq int64) []contractsv1.ConfigRecord {
+func (a *Adapter) ConfigRecords(next *contracts.LedgerState, changes []contracts.ContractDataChange, ledgerSeq int64) []contracts.ConfigRecord {
 	if next == nil {
-		next = &contractsv1.LedgerState{}
+		next = &contracts.LedgerState{}
 	}
-	oracleByID := make(map[string]contractsv1.OracleState, len(next.Oracles))
+	oracleByID := make(map[string]contracts.OracleState, len(next.Oracles))
 	for _, o := range next.Oracles {
 		oracleByID[o.ContractID] = o
 	}
-	poolByID := make(map[string]contractsv1.PoolState, len(next.Pools))
+	poolByID := make(map[string]contracts.PoolState, len(next.Pools))
 	for _, p := range next.Pools {
 		poolByID[p.ContractID] = p
 	}
@@ -267,7 +267,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 		}
 	}
 
-	records := make([]contractsv1.ConfigRecord, 0, len(dirtyOracle)+len(dirtyPool)+len(dirtyReserve))
+	records := make([]contracts.ConfigRecord, 0, len(dirtyOracle)+len(dirtyPool)+len(dirtyReserve))
 	seq := uint32(ledgerSeq)
 
 	for id, removed := range dirtyOracle {
@@ -279,7 +279,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 		if !ok {
 			continue
 		}
-		records = append(records, contractsv1.ConfigRecord{Kind: kindOracle, EntityKey: id, Ledger: seq, Payload: marshalOracleBody(o)})
+		records = append(records, contracts.ConfigRecord{Kind: kindOracle, EntityKey: id, Ledger: seq, Payload: marshalOracleBody(o)})
 	}
 	for id, removed := range dirtyPool {
 		if removed {
@@ -290,7 +290,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 		if !ok {
 			continue
 		}
-		records = append(records, contractsv1.ConfigRecord{Kind: kindPool, EntityKey: id, Ledger: seq, Payload: marshalPoolBody(p)})
+		records = append(records, contracts.ConfigRecord{Kind: kindPool, EntityKey: id, Ledger: seq, Payload: marshalPoolBody(p)})
 	}
 	for ref, removed := range dirtyReserve {
 		entityKey := ref.pool + reserveKeySep + ref.asset
@@ -306,7 +306,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 		if !ok {
 			continue
 		}
-		records = append(records, contractsv1.ConfigRecord{Kind: kindReserve, EntityKey: entityKey, Ledger: seq, Payload: marshalReserveBody(ref.pool, reserve)})
+		records = append(records, contracts.ConfigRecord{Kind: kindReserve, EntityKey: entityKey, Ledger: seq, Payload: marshalReserveBody(ref.pool, reserve)})
 	}
 	for ref, removed := range dirtyPrice {
 		entityKey := ref.oracle + priceKeySep + strconv.FormatInt(ref.index, 10)
@@ -324,7 +324,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 			// — no upsert; the reserve is left without a price rather than seeded stale.
 			continue
 		}
-		records = append(records, contractsv1.ConfigRecord{Kind: kindOraclePrice, EntityKey: entityKey, Ledger: seq, Payload: mustMarshal(oraclePriceBody{OracleID: ref.oracle, AssetIndex: ref.index, PriceRaw: priceRaw})})
+		records = append(records, contracts.ConfigRecord{Kind: kindOraclePrice, EntityKey: entityKey, Ledger: seq, Payload: mustMarshal(oraclePriceBody{OracleID: ref.oracle, AssetIndex: ref.index, PriceRaw: priceRaw})})
 	}
 
 	// Deterministic order so a run-twice comparison of the emitted records is stable
@@ -342,7 +342,7 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 // configChangeLive mirrors the live decision the state fold applies to a change:
 // live requires a present value AND a TTL that has not lapsed. Eviction or TTL
 // expiry of a config key is a removal (tombstone).
-func configChangeLive(ch contractsv1.ContractDataChange, ledgerSeq int64) bool {
+func configChangeLive(ch contracts.ContractDataChange, ledgerSeq int64) bool {
 	if !ch.Live || ch.ValueXDR == nil {
 		return false
 	}
@@ -352,20 +352,20 @@ func configChangeLive(ch contractsv1.ContractDataChange, ledgerSeq int64) bool {
 	return true
 }
 
-func tombstone(kind, entityKey string, ledger uint32) contractsv1.ConfigRecord {
-	return contractsv1.ConfigRecord{Kind: kind, EntityKey: entityKey, Ledger: ledger, Removed: true}
+func tombstone(kind, entityKey string, ledger uint32) contracts.ConfigRecord {
+	return contracts.ConfigRecord{Kind: kind, EntityKey: entityKey, Ledger: ledger, Removed: true}
 }
 
-func reserveByAsset(pool contractsv1.PoolState, assetID string) (contractsv1.ReserveState, bool) {
+func reserveByAsset(pool contracts.PoolState, assetID string) (contracts.ReserveState, bool) {
 	for _, r := range pool.Reserves {
 		if r.AssetID == assetID {
 			return r, true
 		}
 	}
-	return contractsv1.ReserveState{}, false
+	return contracts.ReserveState{}, false
 }
 
-func oraclePriceByIndex(oracle contractsv1.OracleState, index int64) (string, bool) {
+func oraclePriceByIndex(oracle contracts.OracleState, index int64) (string, bool) {
 	for _, p := range oracle.Prices {
 		if p.Index == index {
 			return p.PriceRaw, true
@@ -374,7 +374,7 @@ func oraclePriceByIndex(oracle contractsv1.OracleState, index int64) (string, bo
 	return "", false
 }
 
-func marshalOracleBody(o contractsv1.OracleState) []byte {
+func marshalOracleBody(o contracts.OracleState) []byte {
 	body := oracleConfigBody{Decimals: o.Decimals}
 	body.Assets = make([]oracleAssetBody, 0, len(o.Assets))
 	for _, a := range o.Assets {
@@ -389,7 +389,7 @@ func marshalOracleBody(o contractsv1.OracleState) []byte {
 	return mustMarshal(body)
 }
 
-func marshalPoolBody(p contractsv1.PoolState) []byte {
+func marshalPoolBody(p contracts.PoolState) []byte {
 	return mustMarshal(poolConfigBody{
 		Oracle:   p.OracleContract,
 		Backstop: p.BackstopContract,
@@ -399,7 +399,7 @@ func marshalPoolBody(p contractsv1.PoolState) []byte {
 	})
 }
 
-func marshalReserveBody(poolID string, r contractsv1.ReserveState) []byte {
+func marshalReserveBody(poolID string, r contracts.ReserveState) []byte {
 	return mustMarshal(reserveConfigBody{
 		PoolID:     poolID,
 		AssetID:    r.AssetID,
@@ -434,15 +434,15 @@ func mustMarshal(v any) []byte {
 // config (with reserve config attached) and the oracle asset->index map with
 // decimals; it carries NO prices, NO ResData and NO positions — those re-fold from
 // bronze after the restart. Reserve records whose pool was not loaded are dropped.
-func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv1.LedgerState, error) {
-	pools := map[string]*contractsv1.PoolState{}
-	reservesByPool := map[string][]contractsv1.ReserveState{}
-	oracles := []contractsv1.OracleState{}
+func (a *Adapter) HydrateConfig(records []contracts.ConfigRecord) (*contracts.LedgerState, error) {
+	pools := map[string]*contracts.PoolState{}
+	reservesByPool := map[string][]contracts.ReserveState{}
+	oracles := []contracts.OracleState{}
 	// Prices are a separate facet keyed by (oracle, index); stitch them onto their
 	// oracle's map after both facets are read, so the reload reconstructs a COMPLETE
 	// OracleState{Decimals, Assets, Prices} and the first post-restart ledger has no
 	// null-HF window.
-	pricesByOracle := map[string][]contractsv1.OracleIndexPrice{}
+	pricesByOracle := map[string][]contracts.OracleIndexPrice{}
 
 	for _, rec := range records {
 		if rec.Removed {
@@ -454,9 +454,9 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
 				return nil, err
 			}
-			oracle := contractsv1.OracleState{ContractID: rec.EntityKey, Decimals: body.Decimals}
+			oracle := contracts.OracleState{ContractID: rec.EntityKey, Decimals: body.Decimals}
 			for _, asset := range body.Assets {
-				oracle.Assets = append(oracle.Assets, contractsv1.OracleAssetIndex{AssetID: asset.AssetID, Index: asset.Index})
+				oracle.Assets = append(oracle.Assets, contracts.OracleAssetIndex{AssetID: asset.AssetID, Index: asset.Index})
 			}
 			oracles = append(oracles, oracle)
 		case kindOraclePrice:
@@ -464,13 +464,13 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
 				return nil, err
 			}
-			pricesByOracle[body.OracleID] = append(pricesByOracle[body.OracleID], contractsv1.OracleIndexPrice{Index: body.AssetIndex, PriceRaw: body.PriceRaw})
+			pricesByOracle[body.OracleID] = append(pricesByOracle[body.OracleID], contracts.OracleIndexPrice{Index: body.AssetIndex, PriceRaw: body.PriceRaw})
 		case kindPool:
 			var body poolConfigBody
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
 				return nil, err
 			}
-			pools[rec.EntityKey] = &contractsv1.PoolState{
+			pools[rec.EntityKey] = &contracts.PoolState{
 				ContractID:       rec.EntityKey,
 				OracleContract:   body.Oracle,
 				BackstopContract: body.Backstop,
@@ -483,7 +483,7 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
 				return nil, err
 			}
-			reservesByPool[body.PoolID] = append(reservesByPool[body.PoolID], contractsv1.ReserveState{
+			reservesByPool[body.PoolID] = append(reservesByPool[body.PoolID], contracts.ReserveState{
 				ReserveIndex:  body.Index,
 				AssetID:       body.AssetID,
 				AssetDecimals: body.Decimals,
@@ -500,7 +500,7 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 		}
 	}
 
-	state := &contractsv1.LedgerState{}
+	state := &contracts.LedgerState{}
 	poolIDs := make([]string, 0, len(pools))
 	for id := range pools {
 		poolIDs = append(poolIDs, id)

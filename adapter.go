@@ -1,20 +1,20 @@
-package blend
+package lidapters
 
 import (
 	"fmt"
 
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters/contracts"
 	"github.com/stellar/go-stellar-sdk/strkey"
 )
 
-// Adapter satisfies contractsv1.ProtocolAdapter: event decode (Transform),
+// Adapter satisfies contracts.ProtocolAdapter: event decode (Transform),
 // state decode (DecodeState, in state.go), and ownership (OwnsContract).
-var _ contractsv1.ProtocolAdapter = (*Adapter)(nil)
+var _ contracts.ProtocolAdapter = (*Adapter)(nil)
 
 // Adapter also owns its low-frequency config across process restarts: it declares
 // the storage schema, emits config records, and rehydrates the seed state. See
 // config_state.go.
-var _ contractsv1.ConfigStateful = (*Adapter)(nil)
+var _ contracts.ConfigStateful = (*Adapter)(nil)
 
 type Adapter struct {
 	cfg Config
@@ -62,15 +62,15 @@ func (a *Adapter) Protocol() string {
 	return a.cfg.Protocol
 }
 
-func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.TransformOutput, error) {
-	out := &contractsv1.TransformOutput{
+func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.TransformOutput, error) {
+	out := &contracts.TransformOutput{
 		LedgerSeq:  input.LedgerSeq,
-		Activities: make([]contractsv1.Activity, 0, len(input.Events)),
-		Positions:  make([]contractsv1.Position, 0, 32),
-		Summaries:  make([]contractsv1.PositionSummary, 0, 32),
-		Reserves:   make([]contractsv1.Reserve, 0, 16),
-		Contracts:  make([]contractsv1.Contract, 0, 8),
-		Quarantine: make([]contractsv1.QuarantineEvent, 0, 8),
+		Activities: make([]contracts.Activity, 0, len(input.Events)),
+		Positions:  make([]contracts.Position, 0, 32),
+		Summaries:  make([]contracts.PositionSummary, 0, 32),
+		Reserves:   make([]contracts.Reserve, 0, 16),
+		Contracts:  make([]contracts.Contract, 0, 8),
+		Quarantine: make([]contracts.QuarantineEvent, 0, 8),
 	}
 
 	for _, evt := range input.Events {
@@ -79,7 +79,7 @@ func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.Tran
 			continue
 		}
 		if decoded.activityType == "" {
-			out.Quarantine = append(out.Quarantine, contractsv1.QuarantineEvent{
+			out.Quarantine = append(out.Quarantine, contracts.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), "unknown"),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  evt.LedgerSeq,
@@ -92,11 +92,11 @@ func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.Tran
 			})
 			continue
 		}
-		if decoded.activityType == contractsv1.ActivityTypeStatusChange && decoded.address == "" {
+		if decoded.activityType == contracts.ActivityTypeStatusChange && decoded.address == "" {
 			decoded.address = evt.ContractID
 		}
 		if reason := activityIdentityFailure(decoded, evt); reason != "" {
-			out.Quarantine = append(out.Quarantine, contractsv1.QuarantineEvent{
+			out.Quarantine = append(out.Quarantine, contracts.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), reason),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  evt.LedgerSeq,
@@ -109,7 +109,7 @@ func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.Tran
 			})
 			continue
 		}
-		out.Activities = append(out.Activities, contractsv1.Activity{
+		out.Activities = append(out.Activities, contracts.Activity{
 			ID:           stableID(a.cfg.Protocol, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), string(decoded.activityType)),
 			LedgerSeq:    evt.LedgerSeq,
 			TxHash:       evt.TxHash,
@@ -135,7 +135,7 @@ func (a *Adapter) Transform(input contractsv1.TransformInput) (*contractsv1.Tran
 	return out, nil
 }
 
-func activityIdentityFailure(decoded decodedEvent, evt contractsv1.RawEventEnvelope) string {
+func activityIdentityFailure(decoded decodedEvent, evt contracts.RawEventEnvelope) string {
 	if decoded.address == "" {
 		return "missing_activity_address"
 	}
@@ -145,7 +145,7 @@ func activityIdentityFailure(decoded decodedEvent, evt contractsv1.RawEventEnvel
 	if decoded.assetID != "" && !strkey.IsValidContractAddress(decoded.assetID) {
 		return "invalid_activity_asset"
 	}
-	if decoded.activityType == contractsv1.ActivityTypeStatusChange {
+	if decoded.activityType == contracts.ActivityTypeStatusChange {
 		if decoded.address != evt.ContractID || !strkey.IsValidContractAddress(decoded.address) {
 			return "invalid_activity_address"
 		}

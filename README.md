@@ -2,14 +2,14 @@
 
 Public adapter module for Lightgate protocol adapters.
 
-This module contains shared adapter contracts and protocol adapter packages. Blend lives under `adapters/blend`; future adapters such as Aquarius or SoroSwap should live under `adapters/<protocol>`. Adapter packages must not import relay, ingest, database, queue, or runtime packages.
+This module is the Blend protocol adapter. The adapter lives at the module root (`package lidapters`) and the shared adapter contracts live in `contracts` (`package contracts`). The adapter must not import relay, ingest, database, queue, or runtime packages.
 
 ## Imports
 
 ```go
 import (
-	blend "github.com/daccred/lidapters/adapters/blend"
-	contractsv1 "github.com/daccred/lidapters/contracts/v1"
+	"github.com/daccred/lidapters"
+	"github.com/daccred/lidapters/contracts"
 )
 ```
 

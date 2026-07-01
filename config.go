@@ -1,4 +1,4 @@
-package blend
+package lidapters
 
 type Config struct {
 	AdapterID      string

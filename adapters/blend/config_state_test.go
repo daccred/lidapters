@@ -141,11 +141,12 @@ func TestHydrateConfig_RoundTripsConfigOnly(t *testing.T) {
 	}
 }
 
-// TestEmitGuard_ConfigOnlySeedWritesNoValuedRows is the no-null-overwrite proof at
-// the adapter tier: transforming a config-only seed (reserves with config but no
-// folded ResData, no positions) emits ZERO reserves and ZERO summaries, so a
-// restart cannot overwrite good gold with zero-valued rows before the data
-// re-folds from bronze.
+// TestEmitGuard_ConfigOnlySeedWritesNoValuedRows is the no-null-overwrite proof
+// (ResData axis) at the adapter tier: transforming a config-only seed (reserves
+// with config but no folded ResData, no positions) emits ZERO reserves and ZERO
+// summaries, so a restart cannot overwrite good gold with zero-valued rows before
+// the data re-folds from bronze. The price axis (map present, price missing) is
+// covered by the relay's TestRelayRestart_PriceUnavailableSuppressesSummary.
 func TestEmitGuard_ConfigOnlySeedWritesNoValuedRows(t *testing.T) {
 	t.Parallel()
 	layout := loadOracleLayout(t)
@@ -183,10 +184,11 @@ func TestEmitGuard_ConfigOnlySeedWritesNoValuedRows(t *testing.T) {
 }
 
 // TestEmitGuard_SuppressesDataIncompleteSummary proves the no-null-overwrite
-// property extends to per-account summaries: after a config-only reload a
-// cross-asset account whose one reserve's ResData has not folded yet is NOT
-// emitted with an incomplete (single-leg) health factor — its summary is withheld
-// so the account's good gold is preserved (stale-but-safe), while the reserve that
+// property extends to per-account summaries on the ResData axis: after a
+// config-only reload a cross-asset account whose one reserve's ResData has not
+// folded yet is NOT emitted with an incomplete (single-leg) health factor — its
+// summary is withheld so the account's good gold is preserved (stale-but-safe),
+// while the reserve that
 // does have data is still emitted.
 func TestEmitGuard_SuppressesDataIncompleteSummary(t *testing.T) {
 	t.Parallel()

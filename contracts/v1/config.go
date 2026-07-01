@@ -80,7 +80,7 @@ type ConfigView struct {
 
 // ConfigGeneratedColumn is one STORED generated column derived from the jsonb
 // payload. Expr is a Postgres expression over `payload` (e.g.
-// `NULLIF(payload->>'c_factor','')::numeric / 1e7`). The adapter owns the
+// `NULLIF(payload->>'c_factor',”)::numeric / 1e7`). The adapter owns the
 // expression, including any protocol-specific decimal scaling, so the scaling
 // knowledge stays out of the host.
 type ConfigGeneratedColumn struct {

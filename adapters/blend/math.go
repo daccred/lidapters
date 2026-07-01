@@ -65,24 +65,29 @@ type normalizedReserve struct {
 }
 
 type poolSummaryAccumulator struct {
-	poolContract              string
-	depositedUSD              decimal.Decimal
-	borrowedUSD               decimal.Decimal
-	effectiveCollateralUSD    decimal.Decimal
-	effectiveLiabilityUSD     decimal.Decimal
-	netAPYWeightUSD           decimal.Decimal
-	netAPYNumeratorUSD        decimal.Decimal
-	lFactorZeroLiability      bool
-	hasLiability              bool
-	hasEffectiveCollateral    bool
-	pricePartial              bool
-	// dataPartial is set when a held reserve's ResData has not folded yet (a
-	// cold-start config-only reload skips it from valuation). An account with a
-	// data-incomplete pool would compute a health factor from only a subset of its
-	// legs, so its summary is suppressed rather than emitted over good gold; it
-	// self-heals once the reserve's data re-folds from bronze.
-	dataPartial   bool
-	aprPartial    bool
+	poolContract           string
+	depositedUSD           decimal.Decimal
+	borrowedUSD            decimal.Decimal
+	effectiveCollateralUSD decimal.Decimal
+	effectiveLiabilityUSD  decimal.Decimal
+	netAPYWeightUSD        decimal.Decimal
+	netAPYNumeratorUSD     decimal.Decimal
+	lFactorZeroLiability   bool
+	hasLiability           bool
+	hasEffectiveCollateral bool
+	pricePartial           bool
+	// dataPartial / reservePricePartial are the two cold-start staleness axes. A
+	// held reserve leg is dropped from valuation when its ResData has not folded yet
+	// (dataPartial) or when its oracle price is unavailable after reload — map
+	// present but price missing, e.g. an evicted temporary price entry or a price not
+	// yet re-set (reservePricePartial). Either makes the account's health factor
+	// incomplete, so its summary is suppressed rather than emitted over good gold; it
+	// self-heals once the missing data/price re-folds from bronze. reservePricePartial
+	// is scoped to reserve legs only — the backstop pricePartial (LP-token pricing,
+	// always unavailable in the current decode) must NOT suppress an account.
+	dataPartial               bool
+	reservePricePartial       bool
+	aprPartial                bool
 	netAPYPartial             bool
 	liquidationCollaterals    []liquidationCollateral
 	liquidationPriceScenarios map[string]string
@@ -397,7 +402,13 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		poolSummary := ensurePoolSummary(userPos.Address, userPos.PoolContractID)
 		protocolSummary := ensureProtocolSummary(userPos.Address)
 		if !reserve.priceAvailable {
+			// The reserve is in the oracle map but has no usable price (map-present /
+			// price-missing after reload, or an evicted/rejected price). Drop the leg
+			// AND mark the account data-incomplete on the price axis so its summary is
+			// suppressed below — a health factor computed without this leg's USD value
+			// must not overwrite the account's good gold. Self-heals on the next price.
 			poolSummary.pricePartial = true
+			poolSummary.reservePricePartial = true
 			continue
 		}
 
@@ -584,18 +595,20 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 	for _, address := range addresses {
 		poolsForAddress := poolSummaries[address]
 
-		// Stale-but-safe: if any of the account's pools is data-incomplete (a held
-		// reserve's ResData has not folded after a cold-start config-only reload),
-		// suppress the whole summary so an incomplete health factor never overwrites
-		// the account's good gold snapshot. It re-emits once the data re-folds.
-		dataIncomplete := false
+		// Stale-but-safe: if any of the account's pools is incomplete on either
+		// cold-start axis — a held reserve's ResData has not folded, or its oracle
+		// price is unavailable after a config reload — suppress the whole summary so an
+		// incomplete/null health factor never overwrites the account's good gold. It
+		// re-emits once the missing data/price re-folds. Backstop LP-price partiality
+		// (reservePricePartial is reserve-scoped) deliberately does not suppress.
+		incomplete := false
 		for _, pool := range poolsForAddress {
-			if pool.dataPartial {
-				dataIncomplete = true
+			if pool.dataPartial || pool.reservePricePartial {
+				incomplete = true
 				break
 			}
 		}
-		if dataIncomplete {
+		if incomplete {
 			continue
 		}
 

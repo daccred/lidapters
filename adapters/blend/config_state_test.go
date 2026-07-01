@@ -88,8 +88,9 @@ func TestConfigRecords_Deterministic(t *testing.T) {
 }
 
 // TestHydrateConfig_RoundTripsConfigOnly proves the persisted records rebuild a
-// seed LedgerState with the oracle map + pool/reserve config and NO data (no
-// prices, no ResData, no positions) — the config-only cold-start seed.
+// seed LedgerState with the COMPLETE oracle (map + prices), pool config and reserve
+// config, and no reserve DATA / positions (those re-fold from bronze). The oracle's
+// prices are reloaded, not self-healed, so a restart has no null-HF window.
 func TestHydrateConfig_RoundTripsConfigOnly(t *testing.T) {
 	t.Parallel()
 	layout := loadOracleLayout(t)
@@ -110,8 +111,10 @@ func TestHydrateConfig_RoundTripsConfigOnly(t *testing.T) {
 	if len(seed.Oracles) != 1 || len(seed.Oracles[0].Assets) != 4 {
 		t.Fatalf("hydrated oracle wrong: %#v", seed.Oracles)
 	}
-	if len(seed.Oracles[0].Prices) != 0 {
-		t.Fatalf("hydrated oracle must carry no prices, got %d", len(seed.Oracles[0].Prices))
+	// The oracle is persisted completely: the map AND the prices are reloaded, so a
+	// restart has no null-HF window (prices are present, not awaiting a set_price).
+	if len(seed.Oracles[0].Prices) != 4 {
+		t.Fatalf("hydrated oracle must carry all 4 reloaded prices, got %d", len(seed.Oracles[0].Prices))
 	}
 	if len(seed.Pools) != 1 || seed.Pools[0].OracleContract != layout.OracleContract {
 		t.Fatalf("hydrated pool wrong: %#v", seed.Pools)

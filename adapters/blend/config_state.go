@@ -18,24 +18,29 @@ package blend
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 
 	contractsv1 "github.com/daccred/lidapters/contracts/v1"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 const (
-	kindOracle  = "blend.oracle"
-	kindPool    = "blend.pool"
-	kindReserve = "blend.reserve"
+	kindOracle      = "blend.oracle"
+	kindOraclePrice = "blend.oracle_price"
+	kindPool        = "blend.pool"
+	kindReserve     = "blend.reserve"
 
-	tableOracle  = "blend_oracle_config"
-	tablePool    = "blend_pool_config"
-	tableReserve = "blend_reserve_config"
+	tableOracle      = "blend_oracle_config"
+	tableOraclePrice = "blend_oracle_price"
+	tablePool        = "blend_pool_config"
+	tableReserve     = "blend_reserve_config"
 
 	// reserveKeySep joins the pool id and asset id into the reserve's opaque
+	// entity_key; priceKeySep joins the oracle id and asset index into the price's
 	// entity_key. The host treats the whole string as opaque; hydration recovers the
-	// pool binding from the payload's pool_id, not by splitting this key.
+	// bindings from the payload, not by splitting these keys.
 	reserveKeySep = "|"
+	priceKeySep   = "|"
 )
 
 // factorScaleExpr is the 7-decimal fixed-point divisor Blend stores its factors and
@@ -67,6 +72,44 @@ func (a *Adapter) ConfigSchema() []contractsv1.ConfigTableSchema {
 			Indexes: []contractsv1.ConfigIndex{
 				{Name: "idx_blend_oracle_config_decimals", Columns: []string{"decimals"}},
 			},
+			// Per-asset unnest of the oracle's asset->index map for analytics.
+			Views: []contractsv1.ConfigView{{
+				Name: "blend_oracle_asset",
+				Body: "SELECT entity_key AS oracle_id, ledger, removed,\n" +
+					"       (asset->>'asset_id') AS asset_id,\n" +
+					"       NULLIF(asset->>'index','')::int AS asset_index\n" +
+					"FROM blend_oracle_config, jsonb_array_elements(payload->'assets') AS asset",
+			}},
+		},
+		{
+			// The oracle's raw index->price, one row per (oracle, asset_index) change.
+			// Persisting prices (not just the map) is what removes the null-HF window
+			// on restart: the reload stitches the latest price per index onto the map.
+			Kind:  kindOraclePrice,
+			Table: tableOraclePrice,
+			Generated: []contractsv1.ConfigGeneratedColumn{
+				{Name: "oracle_id", SQLType: "text", Expr: "payload->>'oracle_id'"},
+				{Name: "asset_index", SQLType: "int", Expr: "NULLIF(payload->>'asset_index','')::int"},
+				{Name: "price_raw", SQLType: "numeric", Expr: "NULLIF(payload->>'price_raw','')::numeric"},
+			},
+			Indexes: []contractsv1.ConfigIndex{
+				{Name: "idx_blend_oracle_price_oracle", Columns: []string{"oracle_id"}},
+				{Name: "idx_blend_oracle_price_index", Columns: []string{"oracle_id", "asset_index"}},
+			},
+			// Price history scaled by the oracle's decimals (a cross-table join, so it
+			// lives in a view rather than a generated column).
+			Views: []contractsv1.ConfigView{{
+				Name: "blend_oracle_price_scaled",
+				Body: "SELECT p.oracle_id, p.asset_index, p.ledger, p.removed, p.price_raw,\n" +
+					"       CASE WHEN o.decimals IS NULL THEN NULL\n" +
+					"            ELSE p.price_raw / power(10::numeric, o.decimals) END AS price_scaled\n" +
+					"FROM blend_oracle_price p\n" +
+					"LEFT JOIN LATERAL (\n" +
+					"    SELECT decimals FROM blend_oracle_config c\n" +
+					"    WHERE c.entity_key = p.oracle_id AND c.ledger <= p.ledger AND NOT c.removed\n" +
+					"    ORDER BY c.ledger DESC LIMIT 1\n" +
+					") o ON true",
+			}},
 		},
 		{
 			Kind:  kindPool,
@@ -119,6 +162,12 @@ type oracleAssetBody struct {
 	Index   int64  `json:"index"`
 }
 
+type oraclePriceBody struct {
+	OracleID   string `json:"oracle_id"`
+	AssetIndex int64  `json:"asset_index"`
+	PriceRaw   string `json:"price_raw"`
+}
+
 type poolConfigBody struct {
 	Oracle   string `json:"oracle"`
 	Backstop string `json:"backstop"`
@@ -169,6 +218,11 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 	dirtyPool := map[string]bool{}
 	type reserveRef struct{ pool, asset string }
 	dirtyReserve := map[reserveRef]bool{}
+	type priceRef struct {
+		oracle string
+		index  int64
+	}
+	dirtyPrice := map[priceRef]bool{}
 
 	for _, ch := range changes {
 		key, ok := decodeScValBase64(ch.KeyXDR)
@@ -185,6 +239,17 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 				dirtyOracle[ch.ContractID] = removed
 			} else if _, isPool := poolByID[ch.ContractID]; isPool {
 				dirtyPool[ch.ContractID] = removed
+			}
+			continue
+		}
+		if isOraclePriceKey(key) {
+			// A set_price entry (u128 key = asset index) on an owned oracle. Persist
+			// the raw price so a restart reloads it — no waiting for the next
+			// set_price. The oracle must be known (in next) to tie the index to a map.
+			if _, isOracle := oracleByID[ch.ContractID]; isOracle {
+				if index, ok := scInt64(key); ok && index >= 0 {
+					dirtyPrice[priceRef{ch.ContractID, index}] = removed
+				}
 			}
 			continue
 		}
@@ -243,6 +308,24 @@ func (a *Adapter) ConfigRecords(next *contractsv1.LedgerState, changes []contrac
 		}
 		records = append(records, contractsv1.ConfigRecord{Kind: kindReserve, EntityKey: entityKey, Ledger: seq, Payload: marshalReserveBody(ref.pool, reserve)})
 	}
+	for ref, removed := range dirtyPrice {
+		entityKey := ref.oracle + priceKeySep + strconv.FormatInt(ref.index, 10)
+		if removed {
+			records = append(records, tombstone(kindOraclePrice, entityKey, seq))
+			continue
+		}
+		oracle, ok := oracleByID[ref.oracle]
+		if !ok {
+			continue
+		}
+		priceRaw, ok := oraclePriceByIndex(oracle, ref.index)
+		if !ok {
+			// The oracle carries no live price for this index (evicted / not decoded)
+			// — no upsert; the reserve is left without a price rather than seeded stale.
+			continue
+		}
+		records = append(records, contractsv1.ConfigRecord{Kind: kindOraclePrice, EntityKey: entityKey, Ledger: seq, Payload: mustMarshal(oraclePriceBody{OracleID: ref.oracle, AssetIndex: ref.index, PriceRaw: priceRaw})})
+	}
 
 	// Deterministic order so a run-twice comparison of the emitted records is stable
 	// (the host writes them keyed, so order does not affect storage, but pinning it
@@ -280,6 +363,15 @@ func reserveByAsset(pool contractsv1.PoolState, assetID string) (contractsv1.Res
 		}
 	}
 	return contractsv1.ReserveState{}, false
+}
+
+func oraclePriceByIndex(oracle contractsv1.OracleState, index int64) (string, bool) {
+	for _, p := range oracle.Prices {
+		if p.Index == index {
+			return p.PriceRaw, true
+		}
+	}
+	return "", false
 }
 
 func marshalOracleBody(o contractsv1.OracleState) []byte {
@@ -346,6 +438,11 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 	pools := map[string]*contractsv1.PoolState{}
 	reservesByPool := map[string][]contractsv1.ReserveState{}
 	oracles := []contractsv1.OracleState{}
+	// Prices are a separate facet keyed by (oracle, index); stitch them onto their
+	// oracle's map after both facets are read, so the reload reconstructs a COMPLETE
+	// OracleState{Decimals, Assets, Prices} and the first post-restart ledger has no
+	// null-HF window.
+	pricesByOracle := map[string][]contractsv1.OracleIndexPrice{}
 
 	for _, rec := range records {
 		if rec.Removed {
@@ -362,6 +459,12 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 				oracle.Assets = append(oracle.Assets, contractsv1.OracleAssetIndex{AssetID: asset.AssetID, Index: asset.Index})
 			}
 			oracles = append(oracles, oracle)
+		case kindOraclePrice:
+			var body oraclePriceBody
+			if err := json.Unmarshal(rec.Payload, &body); err != nil {
+				return nil, err
+			}
+			pricesByOracle[body.OracleID] = append(pricesByOracle[body.OracleID], contractsv1.OracleIndexPrice{Index: body.AssetIndex, PriceRaw: body.PriceRaw})
 		case kindPool:
 			var body poolConfigBody
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
@@ -414,6 +517,11 @@ func (a *Adapter) HydrateConfig(records []contractsv1.ConfigRecord) (*contractsv
 		})
 		pool.Reserves = reserves
 		state.Pools = append(state.Pools, *pool)
+	}
+	for i := range oracles {
+		prices := pricesByOracle[oracles[i].ContractID]
+		sort.Slice(prices, func(a, b int) bool { return prices[a].Index < prices[b].Index })
+		oracles[i].Prices = prices
 	}
 	sort.Slice(oracles, func(i, j int) bool { return oracles[i].ContractID < oracles[j].ContractID })
 	state.Oracles = oracles

@@ -63,6 +63,19 @@ type ConfigTableSchema struct {
 	// queries. The (entity_key, ledger DESC) reload index is always created and need
 	// not be declared here.
 	Indexes []ConfigIndex
+	// Views declares read-only analytics views over the table (e.g. a per-asset
+	// unnest of a jsonb array, or a decimals-scaled price join). They are additive
+	// convenience surfaces the reload path never reads.
+	Views []ConfigView
+}
+
+// ConfigView is an adapter-declared analytics view over one or more config tables.
+// Body is the full SELECT the host wraps in CREATE OR REPLACE VIEW. The adapter
+// owns the SQL (including any jsonb unnest or cross-table decimal scaling) so the
+// host renders it without knowing the shape.
+type ConfigView struct {
+	Name string
+	Body string
 }
 
 // ConfigGeneratedColumn is one STORED generated column derived from the jsonb

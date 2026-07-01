@@ -360,6 +360,9 @@ func (b *blendStateBuilder) apply(change contracts.ContractDataChange, ledgerSeq
 	if wasmHash, ok := contractInstanceWasmHash(value); ok {
 		pool := ensurePool(b.pools, change.ContractID)
 		pool.state.WasmHash = wasmHash
+		if instance, ok := value.GetInstance(); ok {
+			applyPoolInstanceStorage(pool, instance)
+		}
 		b.addDelta(ledgerSeq, "pool", change.ContractID, true, pool.state)
 		return
 	}
@@ -686,6 +689,36 @@ func applyPoolConfig(pool *poolBuilder, value xdr.ScVal) {
 	}
 	if statusRaw, ok := fieldInt32(fields, "status"); ok {
 		pool.state.PoolStatus = blendPoolStatus(statusRaw)
+	}
+}
+
+// applyPoolInstanceStorage folds a Blend pool's instance-storage map. A pool's
+// PoolConfig (oracle, backstop take rate, status) and its backstop address live
+// INSIDE the contract instance's storage, keyed by the symbols "Config" and
+// "Backstop" — they are not emitted as top-level contract_data entries the way
+// "ResList" is. They must be read from the instance here or the pool's oracle
+// link is never populated, and every reserve's USD value and health factor
+// surface as unavailable. The instance is written at deploy and carried across
+// ledgers via loadPrior, so a single Set is enough.
+func applyPoolInstanceStorage(pool *poolBuilder, instance xdr.ScContractInstance) {
+	if instance.Storage == nil {
+		return
+	}
+	for _, entry := range []xdr.ScMapEntry(*instance.Storage) {
+		name, ok := scSymbol(entry.Key)
+		if !ok {
+			continue
+		}
+		switch name {
+		case "Config":
+			if isPoolConfig(entry.Val) {
+				applyPoolConfig(pool, entry.Val)
+			}
+		case "Backstop":
+			if address, ok := scAddress(entry.Val); ok {
+				pool.state.BackstopContract = address
+			}
+		}
 	}
 }
 

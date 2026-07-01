@@ -109,11 +109,23 @@ func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.Transfor
 			})
 			continue
 		}
+		txHash := evt.TxHash
+		eventIndex := evt.EventIndex
+		if decoded.activityType == contracts.ActivityTypeStatusChange {
+			// Gold's lifecycle_synthetic_identity constraint keys a status change
+			// as a per-ledger contract fact, not a per-event one:
+			// tx_hash = status:<contract>:<ledger>, event_index = 0. The raw
+			// event's tx hash and index would violate the constraint, so emit the
+			// synthetic identity (and derive the stable ID from it too, so it stays
+			// deterministic regardless of which raw event carried the change).
+			txHash = statusChangeTxHash(evt.ContractID, evt.LedgerSeq)
+			eventIndex = 0
+		}
 		out.Activities = append(out.Activities, contracts.Activity{
-			ID:           stableID(a.cfg.Protocol, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), string(decoded.activityType)),
+			ID:           stableID(a.cfg.Protocol, fmt.Sprintf("%d", evt.LedgerSeq), txHash, fmt.Sprintf("%d", eventIndex), string(decoded.activityType)),
 			LedgerSeq:    evt.LedgerSeq,
-			TxHash:       evt.TxHash,
-			EventIndex:   evt.EventIndex,
+			TxHash:       txHash,
+			EventIndex:   eventIndex,
 			ContractID:   evt.ContractID,
 			Address:      decoded.address,
 			Protocol:     a.cfg.Protocol,
@@ -133,6 +145,17 @@ func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.Transfor
 	}
 
 	return out, nil
+}
+
+// statusChangeTxHash builds the synthetic transaction hash gold expects for a
+// contract_status_change activity. It MUST match relay migration 001's
+// lifecycle_synthetic_identity CHECK exactly:
+//
+//	tx_hash = 'status:' || contract || ':' || ledger
+//
+// where ledger is the integer column rendered as text (no zero-padding).
+func statusChangeTxHash(contractID string, ledgerSeq int64) string {
+	return fmt.Sprintf("status:%s:%d", contractID, ledgerSeq)
 }
 
 func activityIdentityFailure(decoded decodedEvent, evt contracts.RawEventEnvelope) string {

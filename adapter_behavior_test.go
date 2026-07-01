@@ -304,6 +304,69 @@ func TestLifecycleStatusEventPreservesContractIdentity(t *testing.T) {
 	}
 }
 
+// TestStatusChangeSatisfiesLifecycleSyntheticIdentity is a frozen golden fixture
+// for relay migration 001's lifecycle_synthetic_identity CHECK. A
+// contract_status_change row is only accepted by gold when
+// address = contract, tx_hash = 'status:'||contract||':'||ledger, event_index = 0.
+// The raw event here deliberately carries a real tx hash and a NON-zero event
+// index (the exact shape that crash-looped the live testnet fold at ledger
+// 3289013) — the adapter must overwrite both with the synthetic identity.
+func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(DefaultConfig())
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	contractID := validContractString(t, 61)
+	const ledger = int64(3289013)
+	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "set_reserve")}, i128Val(1))
+
+	out, err := adapter.Transform(contracts.TransformInput{
+		LedgerSeq: ledger,
+		CloseTime: time.Unix(42, 0).UTC(),
+		Events: []contracts.RawEventEnvelope{{
+			LedgerSeq:  ledger,
+			TxHash:     "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e",
+			EventIndex: 3,
+			ContractID: contractID,
+			Topic:      `{"topics":["set_reserve"]}`,
+			RawEvent:   raw,
+			CloseTime:  time.Unix(42, 0).UTC(),
+			Metadata:   map[string]string{"protocol_id": "blend"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Quarantine) != 0 {
+		t.Fatalf("expected no quarantine, got %+v", out.Quarantine)
+	}
+	if len(out.Activities) != 1 {
+		t.Fatalf("expected one lifecycle activity, got %d", len(out.Activities))
+	}
+	got := out.Activities[0]
+	if got.ActivityType != contracts.ActivityTypeStatusChange {
+		t.Fatalf("expected %s, got %s", contracts.ActivityTypeStatusChange, got.ActivityType)
+	}
+	// The three fields the gold CHECK constrains, asserted against the exact SQL
+	// concat so this can never regress.
+	if got.Address != contractID {
+		t.Fatalf("identity address: want contract %s, got %s", contractID, got.Address)
+	}
+	wantTxHash := "status:" + contractID + ":3289013"
+	if got.TxHash != wantTxHash {
+		t.Fatalf("identity tx_hash: want %s, got %s", wantTxHash, got.TxHash)
+	}
+	if got.EventIndex != 0 {
+		t.Fatalf("identity event_index: want 0, got %d", got.EventIndex)
+	}
+	// Non-status activities must keep the raw event's identity untouched.
+	if statusChangeTxHash(contractID, ledger) != wantTxHash {
+		t.Fatalf("helper drift: %s != %s", statusChangeTxHash(contractID, ledger), wantTxHash)
+	}
+}
+
 func TestContractEventDataAddressProducesActivity(t *testing.T) {
 	t.Parallel()
 

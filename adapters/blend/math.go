@@ -65,17 +65,28 @@ type normalizedReserve struct {
 }
 
 type poolSummaryAccumulator struct {
-	poolContract              string
-	depositedUSD              decimal.Decimal
-	borrowedUSD               decimal.Decimal
-	effectiveCollateralUSD    decimal.Decimal
-	effectiveLiabilityUSD     decimal.Decimal
-	netAPYWeightUSD           decimal.Decimal
-	netAPYNumeratorUSD        decimal.Decimal
-	lFactorZeroLiability      bool
-	hasLiability              bool
-	hasEffectiveCollateral    bool
-	pricePartial              bool
+	poolContract           string
+	depositedUSD           decimal.Decimal
+	borrowedUSD            decimal.Decimal
+	effectiveCollateralUSD decimal.Decimal
+	effectiveLiabilityUSD  decimal.Decimal
+	netAPYWeightUSD        decimal.Decimal
+	netAPYNumeratorUSD     decimal.Decimal
+	lFactorZeroLiability   bool
+	hasLiability           bool
+	hasEffectiveCollateral bool
+	pricePartial           bool
+	// dataPartial / reservePricePartial are the two cold-start staleness axes. A
+	// held reserve leg is dropped from valuation when its ResData has not folded yet
+	// (dataPartial) or when its oracle price is unavailable after reload — map
+	// present but price missing, e.g. an evicted temporary price entry or a price not
+	// yet re-set (reservePricePartial). Either makes the account's health factor
+	// incomplete, so its summary is suppressed rather than emitted over good gold; it
+	// self-heals once the missing data/price re-folds from bronze. reservePricePartial
+	// is scoped to reserve legs only — the backstop pricePartial (LP-token pricing,
+	// always unavailable in the current decode) must NOT suppress an account.
+	dataPartial               bool
+	reservePricePartial       bool
 	aprPartial                bool
 	netAPYPartial             bool
 	liquidationCollaterals    []liquidationCollateral
@@ -151,6 +162,18 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		})
 
 		for _, reserve := range pool.Reserves {
+			// A reserve whose ResData half has not been folded yet — config present
+			// but no b/d rate or supply — is a cold-start artifact: config-only reload
+			// seeds a pool's reserve config (from persisted config) before the bronze
+			// re-fold restores its data. Emitting it here would value it at zero
+			// (mustParseDecimal("") == 0) and overwrite the reserve's good gold. It is
+			// also absent from the valuation map so a position that references it is
+			// left stale-but-safe rather than valued against zeros. Once the reserve's
+			// ResData re-folds from bronze it is emitted normally. A genuinely-zero but
+			// folded reserve keeps its ResData strings ("0"), so it is not skipped.
+			if !reserveHasFoldedData(reserve) {
+				continue
+			}
 			nReserve, err := normalizeReserve(pool.ContractID, nPool, reserve)
 			if err != nil {
 				return err
@@ -271,6 +294,11 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		}
 		reserve, ok := reserves[reserveKey(userPos.PoolContractID, userPos.AssetID)]
 		if !ok {
+			// The reserve is not in the valuation map — its ResData has not folded yet
+			// (config-only cold-start reload). Drop this leg AND mark the account's pool
+			// summary data-incomplete so an incomplete health factor is not emitted over
+			// the account's good gold. Self-heals when the reserve's data re-folds.
+			ensurePoolSummary(userPos.Address, userPos.PoolContractID).dataPartial = true
 			continue
 		}
 
@@ -374,7 +402,13 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 		poolSummary := ensurePoolSummary(userPos.Address, userPos.PoolContractID)
 		protocolSummary := ensureProtocolSummary(userPos.Address)
 		if !reserve.priceAvailable {
+			// The reserve is in the oracle map but has no usable price (map-present /
+			// price-missing after reload, or an evicted/rejected price). Drop the leg
+			// AND mark the account data-incomplete on the price axis so its summary is
+			// suppressed below — a health factor computed without this leg's USD value
+			// must not overwrite the account's good gold. Self-heals on the next price.
 			poolSummary.pricePartial = true
+			poolSummary.reservePricePartial = true
 			continue
 		}
 
@@ -560,6 +594,24 @@ func (a *Adapter) computeState(input contractsv1.TransformInput, output *contrac
 
 	for _, address := range addresses {
 		poolsForAddress := poolSummaries[address]
+
+		// Stale-but-safe: if any of the account's pools is incomplete on either
+		// cold-start axis — a held reserve's ResData has not folded, or its oracle
+		// price is unavailable after a config reload — suppress the whole summary so an
+		// incomplete/null health factor never overwrites the account's good gold. It
+		// re-emits once the missing data/price re-folds. Backstop LP-price partiality
+		// (reservePricePartial is reserve-scoped) deliberately does not suppress.
+		incomplete := false
+		for _, pool := range poolsForAddress {
+			if pool.dataPartial || pool.reservePricePartial {
+				incomplete = true
+				break
+			}
+		}
+		if incomplete {
+			continue
+		}
+
 		protocol := ensureProtocolSummary(address)
 
 		healthFactor := ""
@@ -785,6 +837,15 @@ func newV2Pool(v2Scalar, backstopTakeRate string) normalizedPool {
 		backstopTakeRaw:       backstopTakeRaw,
 		backstopTakeAvailable: available,
 	}
+}
+
+// reserveHasFoldedData reports whether a reserve's ResData half has been folded
+// from bronze. ResData sets the b/d rate accumulators and the b/d supplies
+// together, so any one being non-empty means data is present. A reserve rebuilt
+// from persisted config alone (cold-start reload) has all four empty until its
+// bronze re-fold; it must not be valued or emitted until then.
+func reserveHasFoldedData(r contractsv1.ReserveState) bool {
+	return r.BRateRaw != "" || r.DRateRaw != "" || r.BSupplyRaw != "" || r.DSupplyRaw != ""
 }
 
 func normalizeReserve(poolContract string, pool normalizedPool, reserve contractsv1.ReserveState) (normalizedReserve, error) {

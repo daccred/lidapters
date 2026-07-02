@@ -1,11 +1,12 @@
-package lidapters
+package blend
 
 import (
 	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 )
 
 func TestV2RateModifierScaleAndUtilizationClamp(t *testing.T) {
@@ -16,10 +17,10 @@ func TestV2RateModifierScaleAndUtilizationClamp(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 1,
 		CloseTime: time.Unix(0, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
@@ -71,10 +72,10 @@ func TestPoolIsolatedWorstSummarySemantics(t *testing.T) {
 	}
 
 	address := "GUSER"
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 2,
 		CloseTime: time.Unix(10, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{
 				{
 					ContractID:       "CPOOLA",
@@ -177,10 +178,10 @@ func TestBackstopShareAndTokenAccounting(t *testing.T) {
 	}
 
 	unlockAt := time.Unix(2000, 0).UTC()
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 3,
 		CloseTime: time.Unix(20, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID: "CPOOL",
 				WasmHash:   "wasm-v2",
@@ -208,7 +209,7 @@ func TestBackstopShareAndTokenAccounting(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	var backstop *contracts.Position
+	var backstop *bindings.Position
 	for i := range out.Positions {
 		if out.Positions[i].PositionType == contracts.PositionTypeBackstop {
 			backstop = &out.Positions[i]
@@ -249,10 +250,10 @@ func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 4,
 		CloseTime: time.Unix(30, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
@@ -321,10 +322,10 @@ func TestReservePositionAPRMissingEmissionsStaysPartial(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 5,
 		CloseTime: time.Unix(40, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
@@ -381,10 +382,10 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 	// UtilTargetRaw == 0 with non-zero utilization makes the borrow (and hence
 	// supply) base APR invalid, so apr stays partial; but the raw emissions APRs
 	// parse and must be surfaced independently into metadata.
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 6,
 		CloseTime: time.Unix(50, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
@@ -474,10 +475,10 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 		"asset":  assetID,
 	})
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 6,
 		CloseTime: time.Unix(50, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  6,
 			TxHash:     "tx-activity-price",
 			EventIndex: 0,
@@ -490,7 +491,7 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 				"asset_decimals":         "7",
 			},
 		}},
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID: poolID,
 				WasmHash:   "wasm-v2",
@@ -547,10 +548,10 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 		"asset":  assetID,
 	})
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 7,
 		CloseTime: time.Unix(60, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  7,
 			TxHash:     "tx-activity-no-price",
 			EventIndex: 0,
@@ -559,7 +560,7 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 			RawEvent:   raw,
 			CloseTime:  time.Unix(60, 0).UTC(),
 		}},
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID: poolID,
 				WasmHash:   "wasm-v2",
@@ -607,10 +608,10 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 8,
 		CloseTime: time.Unix(70, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				WasmHash:         "wasm-v2",
@@ -665,7 +666,7 @@ func TestLiquidationScenariosArePoolScoped(t *testing.T) {
 	}
 }
 
-func findPosition(output *contracts.TransformOutput, positionType contracts.PositionType) *contracts.Position {
+func findPosition(output *bindings.TransformOutput, positionType contracts.PositionType) *bindings.Position {
 	for i := range output.Positions {
 		if output.Positions[i].PositionType == positionType {
 			return &output.Positions[i]

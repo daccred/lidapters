@@ -1,4 +1,4 @@
-package lidapters
+package blend
 
 import (
 	"encoding/json"
@@ -6,7 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -27,7 +28,7 @@ type decodedEvent struct {
 	metadata     map[string]string
 }
 
-func decodeEvent(evt contracts.RawEventEnvelope) decodedEvent {
+func decodeEvent(evt bindings.RawEventEnvelope) decodedEvent {
 	out := decodedEvent{
 		isBlend:  looksBlend(evt),
 		metadata: map[string]string{"topic": evt.Topic},
@@ -207,7 +208,7 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	}
 }
 
-func looksBlend(evt contracts.RawEventEnvelope) bool {
+func looksBlend(evt bindings.RawEventEnvelope) bool {
 	if evt.Metadata["protocol_id"] == "blend" {
 		return true
 	}

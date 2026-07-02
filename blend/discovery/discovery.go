@@ -1,6 +1,7 @@
-// Event-based Blend pool discovery lives here, in the protocol adapter rather
-// than the relay core, so a protocol stays self-contained: event decode, state
-// decode, transform, and now pool enumeration all live in one package.
+// Package discovery is event-based Blend pool discovery. It lives in the
+// protocol adapter's tree rather than the relay core, so a protocol stays
+// self-contained: event decode, state decode, transform, and pool enumeration
+// all ship with the adapter. It is free functions with no Adapter coupling.
 //
 // Blend deploys each pool through a PoolFactory contract. Enumeration cannot
 // read the factory's *instance storage*: on mainnet the PoolFactoryV2 records
@@ -11,7 +12,7 @@
 // the factory's `deploy` CONTRACT EVENT, whose value is the new pool address.
 // So enumeration is event-based: scan a ledger's bronze raw close-meta for
 // PoolFactory `deploy` events and collect their pool addresses.
-package lidapters
+package discovery
 
 import (
 	"encoding/hex"

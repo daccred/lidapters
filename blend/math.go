@@ -1,4 +1,4 @@
-package lidapters
+package blend
 
 import (
 	"encoding/json"
@@ -8,7 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/shopspring/decimal"
 )
 
@@ -122,7 +123,7 @@ type poolBreakdownEntry struct {
 	LiquidationPriceScenarios map[string]string `json:"liquidation_price_scenarios,omitempty"`
 }
 
-func (a *Adapter) computeState(input contracts.TransformInput, output *contracts.TransformOutput) error {
+func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.TransformOutput) error {
 	if input.State == nil {
 		return nil
 	}
@@ -133,7 +134,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 		pool, wasmHashSource := a.enrichPoolIdentity(pool)
 		nPool, ok := a.resolvePool(pool)
 		if !ok {
-			output.Quarantine = append(output.Quarantine, contracts.QuarantineEvent{
+			output.Quarantine = append(output.Quarantine, bindings.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, "pool", pool.ContractID, "unknown_wasm_hash"),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  input.LedgerSeq,
@@ -146,7 +147,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 			continue
 		}
 		pools[pool.ContractID] = nPool
-		output.Contracts = append(output.Contracts, contracts.Contract{
+		output.Contracts = append(output.Contracts, bindings.Contract{
 			ID:              stableID(a.cfg.Protocol, pool.ContractID),
 			Address:         pool.ContractID,
 			Protocol:        a.cfg.Protocol,
@@ -190,7 +191,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 				supplyAPY = numString(nReserve.supplyAPRNormalized)
 			}
 
-			output.Reserves = append(output.Reserves, contracts.Reserve{
+			output.Reserves = append(output.Reserves, bindings.Reserve{
 				ID:             stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID),
 				Protocol:       a.cfg.Protocol,
 				ContractID:     pool.ContractID,
@@ -382,7 +383,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 			}
 		}
 
-		pos := contracts.Position{
+		pos := bindings.Position{
 			ID:           stableID(a.cfg.Protocol, userPos.Address, userPos.PoolContractID, userPos.AssetID, string(userPos.PositionType)),
 			Address:      userPos.Address,
 			Protocol:     a.cfg.Protocol,
@@ -461,12 +462,12 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 
 		activeShares := parseDecimalOrZero(backstop.UserSharesRaw)
 		queuedShares := decZero
-		q4wEntries := make([]contracts.BackstopQueueEntry, 0, len(backstop.Q4W))
+		q4wEntries := make([]bindings.BackstopQueueEntry, 0, len(backstop.Q4W))
 		var q4wUnlockAt *time.Time
 		for _, q := range backstop.Q4W {
 			share := parseDecimalOrZero(q.SharesRaw)
 			queuedShares = queuedShares.Add(share)
-			q4wEntries = append(q4wEntries, contracts.BackstopQueueEntry{
+			q4wEntries = append(q4wEntries, bindings.BackstopQueueEntry{
 				Amount:   numString(share),
 				UnlockAt: q.UnlockAt.UTC(),
 			})
@@ -543,7 +544,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 			metadata["price_unavailable"] = "true"
 		}
 
-		pos := contracts.Position{
+		pos := bindings.Position{
 			ID:           stableID(a.cfg.Protocol, backstop.Address, backstop.PoolContractID, "backstop"),
 			Address:      backstop.Address,
 			Protocol:     a.cfg.Protocol,
@@ -760,7 +761,7 @@ func (a *Adapter) computeState(input contracts.TransformInput, output *contracts
 			netAPY = protocol.netAPYNumeratorUSD.Div(protocol.netAPYWeightUSD)
 		}
 
-		output.Summaries = append(output.Summaries, contracts.PositionSummary{
+		output.Summaries = append(output.Summaries, bindings.PositionSummary{
 			ID:                     stableID(a.cfg.Protocol, address, "summary"),
 			Address:                address,
 			Protocol:               a.cfg.Protocol,

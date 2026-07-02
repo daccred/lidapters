@@ -1,4 +1,4 @@
-package lidapters
+package discovery
 
 import (
 	"testing"

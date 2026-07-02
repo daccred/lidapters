@@ -1,4 +1,4 @@
-package contracts
+package bindings
 
 // ConfigRecord is an opaque, adapter-owned unit of low-frequency configuration
 // that a storage host persists verbatim and returns unchanged on cold start.

@@ -1,9 +1,10 @@
-package lidapters
+package blend
 
 import (
 	"testing"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -55,7 +56,7 @@ func TestDecodeState_PoolConfigFromInstanceStorage(t *testing.T) {
 	backstopID := validContractString(t, 4)
 
 	instanceKey := xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance}
-	state, err := adapter.DecodeState(nil, []contracts.ContractDataChange{
+	state, err := adapter.DecodeState(nil, []bindings.ContractDataChange{
 		stateChange(t, poolID, instanceKey, poolInstanceVal(t, oracleID, backstopID)),
 	}, 100)
 	if err != nil {

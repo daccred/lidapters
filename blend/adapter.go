@@ -1,20 +1,21 @@
-package lidapters
+package blend
 
 import (
 	"fmt"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/strkey"
 )
 
-// Adapter satisfies contracts.ProtocolAdapter: event decode (Transform),
+// Adapter satisfies bindings.ProtocolAdapter: event decode (Transform),
 // state decode (DecodeState, in state.go), and ownership (OwnsContract).
-var _ contracts.ProtocolAdapter = (*Adapter)(nil)
+var _ bindings.ProtocolAdapter = (*Adapter)(nil)
 
 // Adapter also owns its low-frequency config across process restarts: it declares
 // the storage schema, emits config records, and rehydrates the seed state. See
 // config_state.go.
-var _ contracts.ConfigStateful = (*Adapter)(nil)
+var _ bindings.ConfigStateful = (*Adapter)(nil)
 
 type Adapter struct {
 	cfg Config
@@ -62,15 +63,15 @@ func (a *Adapter) Protocol() string {
 	return a.cfg.Protocol
 }
 
-func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.TransformOutput, error) {
-	out := &contracts.TransformOutput{
+func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformOutput, error) {
+	out := &bindings.TransformOutput{
 		LedgerSeq:  input.LedgerSeq,
-		Activities: make([]contracts.Activity, 0, len(input.Events)),
-		Positions:  make([]contracts.Position, 0, 32),
-		Summaries:  make([]contracts.PositionSummary, 0, 32),
-		Reserves:   make([]contracts.Reserve, 0, 16),
-		Contracts:  make([]contracts.Contract, 0, 8),
-		Quarantine: make([]contracts.QuarantineEvent, 0, 8),
+		Activities: make([]bindings.Activity, 0, len(input.Events)),
+		Positions:  make([]bindings.Position, 0, 32),
+		Summaries:  make([]bindings.PositionSummary, 0, 32),
+		Reserves:   make([]bindings.Reserve, 0, 16),
+		Contracts:  make([]bindings.Contract, 0, 8),
+		Quarantine: make([]bindings.QuarantineEvent, 0, 8),
 	}
 
 	for _, evt := range input.Events {
@@ -79,7 +80,7 @@ func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.Transfor
 			continue
 		}
 		if decoded.activityType == "" {
-			out.Quarantine = append(out.Quarantine, contracts.QuarantineEvent{
+			out.Quarantine = append(out.Quarantine, bindings.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), "unknown"),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  evt.LedgerSeq,
@@ -96,7 +97,7 @@ func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.Transfor
 			decoded.address = evt.ContractID
 		}
 		if reason := activityIdentityFailure(decoded, evt); reason != "" {
-			out.Quarantine = append(out.Quarantine, contracts.QuarantineEvent{
+			out.Quarantine = append(out.Quarantine, bindings.QuarantineEvent{
 				ID:         stableID(a.cfg.AdapterID, fmt.Sprintf("%d", evt.LedgerSeq), evt.TxHash, fmt.Sprintf("%d", evt.EventIndex), reason),
 				AdapterID:  a.cfg.AdapterID,
 				LedgerSeq:  evt.LedgerSeq,
@@ -121,7 +122,7 @@ func (a *Adapter) Transform(input contracts.TransformInput) (*contracts.Transfor
 			txHash = statusChangeTxHash(evt.ContractID, evt.LedgerSeq)
 			eventIndex = 0
 		}
-		out.Activities = append(out.Activities, contracts.Activity{
+		out.Activities = append(out.Activities, bindings.Activity{
 			ID:           stableID(a.cfg.Protocol, fmt.Sprintf("%d", evt.LedgerSeq), txHash, fmt.Sprintf("%d", eventIndex), string(decoded.activityType)),
 			LedgerSeq:    evt.LedgerSeq,
 			TxHash:       txHash,
@@ -158,7 +159,7 @@ func statusChangeTxHash(contractID string, ledgerSeq int64) string {
 	return fmt.Sprintf("status:%s:%d", contractID, ledgerSeq)
 }
 
-func activityIdentityFailure(decoded decodedEvent, evt contracts.RawEventEnvelope) string {
+func activityIdentityFailure(decoded decodedEvent, evt bindings.RawEventEnvelope) string {
 	if decoded.address == "" {
 		return "missing_activity_address"
 	}

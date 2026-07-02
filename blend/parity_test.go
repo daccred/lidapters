@@ -1,4 +1,4 @@
-package lidapters
+package blend
 
 import (
 	"encoding/json"
@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/shopspring/decimal"
 )
 
@@ -49,9 +50,9 @@ func TestRecordedV2ParitySnapshot(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	input := contracts.TransformInput{
+	input := bindings.TransformInput{
 		LedgerSeq: snap.LedgerSeq,
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{
 				{
 					ContractID: snap.PoolContract,

@@ -2,21 +2,36 @@
 
 Public adapter module for Lightgate protocol adapters.
 
-This module is the Blend protocol adapter. The adapter lives at the module root (`package lidapters`) and the shared adapter contracts live in `contracts` (`package contracts`). The adapter must not import relay, ingest, database, queue, or runtime packages.
+The module is nested per protocol. Shared, protocol-agnostic seam types live in
+`bindings`; each protocol owns its own package tree. The adapters must not
+import relay, ingest, database, queue, or runtime packages.
+
+```
+lidapters/
+├── deployments.toml    canonical cross-protocol deploy-ledger pins
+├── deployments.go      pin loader (root package lidapters)
+├── bindings/           ProtocolAdapter seam, envelopes, gold rows, config IoC
+├── blend/              Blend adapter (Transform, DecodeState, config state)
+│   ├── contracts/      Blend-domain types: pool/reserve/oracle state, enums
+│   └── discovery/      event-based pool enumeration from raw close-meta
+└── aquarius/           Aquarius adapter scaffold (not implemented yet)
+```
 
 ## Imports
 
 ```go
 import (
-	"github.com/daccred/lidapters"
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend"
+	"github.com/daccred/lidapters/blend/contracts"
+	"github.com/daccred/lidapters/blend/discovery"
 )
 ```
 
 The module follows semantic versioning. Consumers should pin a release such as:
 
 ```sh
-go get github.com/daccred/lidapters@v0.1.0
+go get github.com/daccred/lidapters@v0.4.0
 ```
 
 ## Commands

@@ -1,4 +1,4 @@
-package lidapters
+package blend
 
 import (
 	"fmt"

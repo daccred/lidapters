@@ -1,4 +1,4 @@
-package lidapters
+package blend
 
 import (
 	"bytes"
@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -22,10 +23,10 @@ func TestUnknownWasmHashIsQuarantined(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 1,
 		CloseTime: time.Unix(0, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{
 				{
 					ContractID: "CPOOLUNKNOWN",
@@ -57,10 +58,10 @@ func TestUnknownEventShapeIsQuarantined(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{
 		"type": "unmapped_shape",
 	})
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 123,
 		CloseTime: time.Unix(10, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{
+		Events: []bindings.RawEventEnvelope{
 			{
 				LedgerSeq:  123,
 				TxHash:     "tx-hash",
@@ -96,10 +97,10 @@ func TestMissingActivityAddressIsQuarantined(t *testing.T) {
 		"asset":  validContractString(t, 42),
 		"amount": "1000",
 	})
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 123,
 		CloseTime: time.Unix(10, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  123,
 			TxHash:     "tx-missing-wallet",
 			EventIndex: 0,
@@ -134,10 +135,10 @@ func TestInvalidActivityAddressIsQuarantined(t *testing.T) {
 		"asset":  validContractString(t, 44),
 		"amount": "1000",
 	})
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 123,
 		CloseTime: time.Unix(10, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  123,
 			TxHash:     "tx-invalid-wallet",
 			EventIndex: 0,
@@ -172,10 +173,10 @@ func TestInvalidActivityAssetIsQuarantined(t *testing.T) {
 		"asset":  "CASSET",
 		"amount": "1000",
 	})
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 123,
 		CloseTime: time.Unix(10, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  123,
 			TxHash:     "tx-invalid-asset",
 			EventIndex: 0,
@@ -210,10 +211,10 @@ func TestInvalidActivityContractIsQuarantined(t *testing.T) {
 		"asset":  validContractString(t, 55),
 		"amount": "1000",
 	})
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 123,
 		CloseTime: time.Unix(10, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  123,
 			TxHash:     "tx-invalid-contract",
 			EventIndex: 0,
@@ -242,10 +243,10 @@ func TestTopicDataXDRFragmentDoesNotBecomeAddress(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 62898493,
 		CloseTime: time.Unix(11, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  62898493,
 			TxHash:     "tx-data-xdr-fragment",
 			EventIndex: 0,
@@ -276,10 +277,10 @@ func TestLifecycleStatusEventPreservesContractIdentity(t *testing.T) {
 	contractID := validContractString(t, 48)
 	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "reserve_config")}, i128Val(1))
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 126,
 		CloseTime: time.Unix(12, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  126,
 			TxHash:     "tx-status",
 			EventIndex: 0,
@@ -322,10 +323,10 @@ func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
 	const ledger = int64(3289013)
 	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "set_reserve")}, i128Val(1))
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: ledger,
 		CloseTime: time.Unix(42, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  ledger,
 			TxHash:     "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e",
 			EventIndex: 3,
@@ -382,10 +383,10 @@ func TestContractEventDataAddressProducesActivity(t *testing.T) {
 		"amount": i128Val(12345),
 	}))
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 124,
 		CloseTime: time.Unix(11, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{{
+		Events: []bindings.RawEventEnvelope{{
 			LedgerSeq:  124,
 			TxHash:     "tx-data-wallet",
 			EventIndex: 0,
@@ -441,10 +442,10 @@ func TestActivityShareTypeDerivedFromActivityType(t *testing.T) {
 				"amount": i128Val(12345),
 			}))
 
-			out, err := adapter.Transform(contracts.TransformInput{
+			out, err := adapter.Transform(bindings.TransformInput{
 				LedgerSeq: 124,
 				CloseTime: time.Unix(11, 0).UTC(),
-				Events: []contracts.RawEventEnvelope{{
+				Events: []bindings.RawEventEnvelope{{
 					LedgerSeq:  124,
 					TxHash:     "tx-" + tc.event,
 					EventIndex: 0,
@@ -476,10 +477,10 @@ func TestConfiguredSingleV2HashEnrichesPoolShapedState(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 125,
 		CloseTime: time.Unix(12, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID:       "CPOOL",
 				BackstopTakeRate: "0",
@@ -539,10 +540,10 @@ func TestDeterministicOutputForSameInput(t *testing.T) {
 		"asset":  validContractString(t, 51),
 	})
 
-	input := contracts.TransformInput{
+	input := bindings.TransformInput{
 		LedgerSeq: 100,
 		CloseTime: time.Unix(1000, 0).UTC(),
-		Events: []contracts.RawEventEnvelope{
+		Events: []bindings.RawEventEnvelope{
 			{
 				LedgerSeq:  100,
 				TxHash:     "tx-1",
@@ -582,10 +583,10 @@ func TestStateMetadataUsesCanonicalOracleKey(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 100,
 		CloseTime: time.Unix(1000, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{
 				{
 					ContractID: "CPOOL",
@@ -660,10 +661,10 @@ func TestBackstopMetadataCarriesQueueShape(t *testing.T) {
 	}
 
 	unlockAt := time.Unix(2000, 0).UTC()
-	out, err := adapter.Transform(contracts.TransformInput{
+	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 101,
 		CloseTime: time.Unix(1001, 0).UTC(),
-		State: &contracts.LedgerState{
+		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{
 				{
 					ContractID: "CPOOL",
@@ -697,7 +698,7 @@ func TestBackstopMetadataCarriesQueueShape(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	var backstop *contracts.Position
+	var backstop *bindings.Position
 	for i := range out.Positions {
 		if out.Positions[i].PositionType == contracts.PositionTypeBackstop {
 			backstop = &out.Positions[i]

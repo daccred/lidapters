@@ -1,11 +1,11 @@
-package lidapters
+package blend
 
 import (
 	"bytes"
 	"encoding/json"
 	"testing"
 
-	"github.com/daccred/lidapters/contracts"
+	"github.com/daccred/lidapters/bindings"
 )
 
 // newOracleCarryAdapter builds an adapter that owns the frozen layout's oracle so
@@ -25,12 +25,12 @@ func newOracleCarryAdapter(t *testing.T, l oracleLayout) *Adapter {
 // asset: the asset's stored price key (a u128 keyed by index) with a fresh raw
 // i128 value. It is a price-only entry — no instance, no pool config — exactly
 // the shape a set_price ledger writes after the oracle was deployed.
-func oraclePriceOnlyChange(t *testing.T, l oracleLayout, code string, rawValue int64) contracts.ContractDataChange {
+func oraclePriceOnlyChange(t *testing.T, l oracleLayout, code string, rawValue int64) bindings.ContractDataChange {
 	t.Helper()
 	return stateChange(t, l.OracleContract, mustDecodeScVal(t, codeKeyXDR(t, l, code)), i128Val(rawValue))
 }
 
-func reservePrice(t *testing.T, state *contracts.LedgerState, l oracleLayout, code string) string {
+func reservePrice(t *testing.T, state *bindings.LedgerState, l oracleLayout, code string) string {
 	t.Helper()
 	return findReserve(t, state, l.PoolContract, assetIDByCode(l, code)).OraclePriceRaw
 }
@@ -64,7 +64,7 @@ func TestDecodeState_OraclePriceCarriesAcrossPriceOnlyLedgers(t *testing.T) {
 
 	// Ledger N+1 — price-only, NO instance: wBTC reprices, the others are silent.
 	const newWBTC = int64(900_000_000_000)
-	stateN1, err := adapter.DecodeState(priorN, []contracts.ContractDataChange{
+	stateN1, err := adapter.DecodeState(priorN, []bindings.ContractDataChange{
 		oraclePriceOnlyChange(t, layout, "wBTC", newWBTC),
 	}, layout.LedgerSeq+1)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestDecodeState_OraclePriceCarriesAcrossPriceOnlyLedgers(t *testing.T) {
 
 	// Ledger N+2 — price-only again, instance STILL never re-seen: XLM reprices.
 	const newXLM = int64(5_000_000)
-	stateN2, err := adapter.DecodeState(stateN1, []contracts.ContractDataChange{
+	stateN2, err := adapter.DecodeState(stateN1, []bindings.ContractDataChange{
 		oraclePriceOnlyChange(t, layout, "XLM", newXLM),
 	}, layout.LedgerSeq+2)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestDecodeState_OraclePriceCarriesAcrossPriceOnlyLedgers(t *testing.T) {
 
 	// The carried oracle state must not leak map-iteration order: folding the same
 	// price-only ledger twice off the same prior is byte-identical.
-	again, err := adapter.DecodeState(priorN, []contracts.ContractDataChange{
+	again, err := adapter.DecodeState(priorN, []bindings.ContractDataChange{
 		oraclePriceOnlyChange(t, layout, "wBTC", newWBTC),
 	}, layout.LedgerSeq+1)
 	if err != nil {
@@ -143,7 +143,7 @@ func TestDecodeState_OraclePriceEvictionClearsReserve(t *testing.T) {
 	// Ledger N+1 — evict the wBTC price entry (not live). The reserve clears.
 	evict := stateChange(t, layout.OracleContract,
 		mustDecodeScVal(t, codeKeyXDR(t, layout, "wBTC")), i128Val(1), withLive(false))
-	stateN1, err := adapter.DecodeState(priorN, []contracts.ContractDataChange{evict}, layout.LedgerSeq+1)
+	stateN1, err := adapter.DecodeState(priorN, []bindings.ContractDataChange{evict}, layout.LedgerSeq+1)
 	if err != nil {
 		t.Fatalf("decode ledger N+1: %v", err)
 	}

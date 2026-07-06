@@ -458,7 +458,12 @@ func TestReservePositionEmissionsSurfaceWhenBaseAPRInvalid(t *testing.T) {
 	}
 }
 
-func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
+// TestActivityUSDValuedAtReserveLedgerPrice pins the activity valuation seam:
+// an asset-bearing activity is valued at the folded oracle price its reserve
+// carries at that ledger (units × price), from in-state data only. Stale
+// event-metadata price stamps (the never-produced event_ledger_usd_price
+// contract this replaced) are ignored.
+func TestActivityUSDValuedAtReserveLedgerPrice(t *testing.T) {
 	t.Parallel()
 
 	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
@@ -487,6 +492,7 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 			RawEvent:   raw,
 			CloseTime:  time.Unix(50, 0).UTC(),
 			Metadata: map[string]string{
+				// Dead stamp contract: must not override the reserve price.
 				"event_ledger_usd_price": "2",
 				"asset_decimals":         "7",
 			},
@@ -523,15 +529,23 @@ func TestActivityUSDUsesEventLedgerPriceOnly(t *testing.T) {
 	if len(out.Activities) != 1 {
 		t.Fatalf("expected one activity, got %d", len(out.Activities))
 	}
-	if out.Activities[0].USDValue != "2" {
-		t.Fatalf("expected frozen event USD value 2, got %s", out.Activities[0].USDValue)
+	// 10000000 raw / 10^7 decimals = 1 unit; 500000000 / 10^8 = 5 USD.
+	if out.Activities[0].USDValue != "5" {
+		t.Fatalf("expected reserve-priced USD value 5, got %s", out.Activities[0].USDValue)
 	}
-	if out.Activities[0].Metadata["usd_value_source"] != "event_ledger_price" {
-		t.Fatalf("expected event ledger price source metadata")
+	if out.Activities[0].Metadata["usd_value_source"] != "reserve_ledger_price" {
+		t.Fatalf("expected reserve ledger price source metadata, got %q", out.Activities[0].Metadata["usd_value_source"])
+	}
+	if out.Activities[0].Metadata["event_price_unavailable"] != "" {
+		t.Fatalf("unexpected event_price_unavailable on priced activity")
 	}
 }
 
-func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
+// TestActivityUSDWithoutFoldedPriceStaysNull pins the unavailability contract:
+// an activity whose asset has no folded oracle price — reserve present but
+// price missing, or no reserve at all (e.g. a reward token) — keeps a NULL
+// usd_value with the explicit marker, never a fabricated zero.
+func TestActivityUSDWithoutFoldedPriceStaysNull(t *testing.T) {
 	t.Parallel()
 
 	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
@@ -540,32 +554,50 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 	}
 	walletID := validAccountString(t, 63)
 	poolID := validContractString(t, 64)
-	assetID := validContractString(t, 65)
-	raw, _ := json.Marshal(map[string]any{
+	reserveAssetID := validContractString(t, 65)
+	nonReserveAssetID := validContractString(t, 66)
+	rawReserveAsset, _ := json.Marshal(map[string]any{
 		"type":   "supply",
 		"amount": "10000000",
 		"wallet": walletID,
-		"asset":  assetID,
+		"asset":  reserveAssetID,
+	})
+	rawNonReserveAsset, _ := json.Marshal(map[string]any{
+		"type":   "supply",
+		"amount": "10000000",
+		"wallet": walletID,
+		"asset":  nonReserveAssetID,
 	})
 
 	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: 7,
 		CloseTime: time.Unix(60, 0).UTC(),
-		Events: []bindings.RawEventEnvelope{{
-			LedgerSeq:  7,
-			TxHash:     "tx-activity-no-price",
-			EventIndex: 0,
-			ContractID: poolID,
-			Topic:      "blend supply",
-			RawEvent:   raw,
-			CloseTime:  time.Unix(60, 0).UTC(),
-		}},
+		Events: []bindings.RawEventEnvelope{
+			{
+				LedgerSeq:  7,
+				TxHash:     "tx-activity-no-price",
+				EventIndex: 0,
+				ContractID: poolID,
+				Topic:      "blend supply",
+				RawEvent:   rawReserveAsset,
+				CloseTime:  time.Unix(60, 0).UTC(),
+			},
+			{
+				LedgerSeq:  7,
+				TxHash:     "tx-activity-no-reserve",
+				EventIndex: 1,
+				ContractID: poolID,
+				Topic:      "blend supply",
+				RawEvent:   rawNonReserveAsset,
+				CloseTime:  time.Unix(60, 0).UTC(),
+			},
+		},
 		State: &bindings.LedgerState{
 			Pools: []contracts.PoolState{{
 				ContractID: poolID,
 				WasmHash:   "wasm-v2",
 				Reserves: []contracts.ReserveState{{
-					AssetID:         assetID,
+					AssetID:         reserveAssetID,
 					AssetDecimals:   7,
 					BRateRaw:        "1000000000000",
 					DRateRaw:        "1000000000000",
@@ -580,8 +612,8 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 					RTwoRaw:         "0",
 					RThreeRaw:       "0",
 					RateModifierRaw: "10000000",
-					OraclePriceRaw:  "500000000",
-					OracleDecimals:  8,
+					// No OraclePriceRaw: the reserve has folded data but no price.
+					OracleDecimals: 8,
 				}},
 			}},
 		},
@@ -589,14 +621,22 @@ func TestActivityUSDMissingEventPriceStaysNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transform: %v", err)
 	}
-	if len(out.Activities) != 1 {
-		t.Fatalf("expected one activity, got %d", len(out.Activities))
+	if len(out.Activities) != 2 {
+		t.Fatalf("expected two activities, got %d", len(out.Activities))
 	}
-	if out.Activities[0].USDValue != "" {
-		t.Fatalf("expected NULL USD value without event price, got %s", out.Activities[0].USDValue)
-	}
-	if out.Activities[0].Metadata["event_price_unavailable"] != "true" {
-		t.Fatalf("expected missing event price metadata")
+	for _, activity := range out.Activities {
+		if activity.USDValue == "0" {
+			t.Fatalf("fabricated zero USD value for %s", activity.TxHash)
+		}
+		if activity.USDValue != "" {
+			t.Fatalf("expected NULL USD value without folded price for %s, got %s", activity.TxHash, activity.USDValue)
+		}
+		if activity.Metadata["event_price_unavailable"] != "true" {
+			t.Fatalf("expected event_price_unavailable marker for %s", activity.TxHash)
+		}
+		if activity.Metadata["usd_value_source"] != "" {
+			t.Fatalf("unexpected usd_value_source without price for %s", activity.TxHash)
+		}
 	}
 }
 

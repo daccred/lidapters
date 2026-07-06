@@ -233,6 +233,13 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		}
 	}
 
+	// Activities are valued at the same folded oracle price the reserve itself
+	// is valued with at this ledger — the reserves map above is the single price
+	// source, resolved purely from in-state data (pool → oracle fold). An
+	// activity whose asset has no folded reserve price (non-reserve asset such
+	// as a reward token, or a cold-start reserve whose data has not re-folded)
+	// keeps a NULL usd_value with the explicit unavailability marker — never a
+	// fabricated zero.
 	for i := range output.Activities {
 		activity := &output.Activities[i]
 		if activity.AssetID == "" || activity.AmountRaw == "" {
@@ -242,24 +249,14 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			activity.Metadata = map[string]string{}
 		}
 		reserve, ok := reserves[reserveKey(activity.ContractID, activity.AssetID)]
-		price, priceOK := activityLedgerPrice(activity.Metadata)
-		if !priceOK {
+		if !ok || !reserve.priceAvailable {
 			activity.Metadata["event_price_unavailable"] = "true"
 			continue
 		}
-		assetDecimals, decimalsOK := activityAssetDecimals(activity.Metadata)
-		if ok {
-			assetDecimals = reserve.assetDecimals
-			decimalsOK = true
-		}
-		if !decimalsOK {
-			activity.Metadata["asset_decimals_unavailable"] = "true"
-			continue
-		}
 		amountRaw := parseDecimalOrZero(activity.AmountRaw)
-		units := amountRaw.Div(decimal.New(1, assetDecimals))
-		activity.USDValue = numString(units.Mul(price))
-		activity.Metadata["usd_value_source"] = "event_ledger_price"
+		units := amountRaw.Div(decimal.New(1, reserve.assetDecimals))
+		activity.USDValue = numString(units.Mul(reserve.usdPrice))
+		activity.Metadata["usd_value_source"] = "reserve_ledger_price"
 	}
 
 	poolSummaries := map[string]map[string]*poolSummaryAccumulator{}
@@ -1006,29 +1003,6 @@ func boolString(v bool) string {
 		return "true"
 	}
 	return "false"
-}
-
-func activityLedgerPrice(metadata map[string]string) (decimal.Decimal, bool) {
-	for _, key := range []string{"event_ledger_usd_price", "ledger_usd_price", "event_usd_price"} {
-		if price, ok := normalizedDecimalInput(metadata[key]); ok {
-			return price, true
-		}
-	}
-	return decZero, false
-}
-
-func activityAssetDecimals(metadata map[string]string) (int32, bool) {
-	for _, key := range []string{"asset_decimals", "event_asset_decimals"} {
-		raw := strings.TrimSpace(metadata[key])
-		if raw == "" {
-			continue
-		}
-		parsed, err := strconv.ParseInt(raw, 10, 32)
-		if err == nil {
-			return int32(parsed), true
-		}
-	}
-	return 0, false
 }
 
 func normalizedAPRInput(raw string) (decimal.Decimal, bool) {

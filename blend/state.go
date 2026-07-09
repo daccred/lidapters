@@ -174,9 +174,10 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 }
 
 // loadPrior reconstructs the mirror from the prior LedgerState so the reducer
-// keeps no state of its own between ledgers. Pools/reserves come from
-// prior.Pools, backstop balances from prior.Backstops, and raw user-position
-// blobs from prior.PendingUserPositions.
+// keeps no state of its own between ledgers. Pools/reserves (including each
+// pool's backstop pool-level balance) come from prior.Pools, per-user backstop
+// balances from prior.Backstops, and raw user-position blobs from
+// prior.PendingUserPositions.
 func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 	for _, pool := range prior.Pools {
 		pb := ensurePool(b.pools, pool.ContractID)
@@ -185,6 +186,17 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 			pb.reserves[reserve.AssetID] = &reserveBuilder{state: reserve}
 		}
 		finalizePoolReserves(pb)
+		// Restored from the pool itself (not from prior.Backstops) so a pool's
+		// backstop total round-trips even in a ledger where it currently has zero
+		// individual backstop depositors.
+		if pool.BackstopSharesRaw != "" || pool.BackstopTokensRaw != "" || pool.BackstopQ4WSharesRaw != "" {
+			b.backstopPools[pool.ContractID] = backstopPoolBalance{
+				poolContract: pool.ContractID,
+				sharesRaw:    pool.BackstopSharesRaw,
+				tokensRaw:    pool.BackstopTokensRaw,
+				q4wRaw:       pool.BackstopQ4WSharesRaw,
+			}
+		}
 	}
 	for _, pending := range prior.PendingUserPositions {
 		value, ok := decodeScValBase64(pending.PositionsXDR)
@@ -199,12 +211,6 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 		}
 	}
 	for _, backstop := range prior.Backstops {
-		// Backstop pool-level balance round-trips via any of its users.
-		b.backstopPools[backstop.PoolContractID] = backstopPoolBalance{
-			poolContract: backstop.PoolContractID,
-			sharesRaw:    backstop.PoolSharesRaw,
-			tokensRaw:    backstop.PoolTokensRaw,
-		}
 		b.backstopUsers[typedBackstopEntityKey(backstop.Address, backstop.PoolContractID)] = backstopUserBalance{
 			poolContract: backstop.PoolContractID,
 			user:         backstop.Address,
@@ -243,6 +249,11 @@ func (b *blendStateBuilder) build() bindings.LedgerState {
 
 	for _, pool := range b.pools {
 		finalizePoolReserves(pool)
+		if balance, ok := b.backstopPools[pool.state.ContractID]; ok {
+			pool.state.BackstopSharesRaw = balance.sharesRaw
+			pool.state.BackstopTokensRaw = balance.tokensRaw
+			pool.state.BackstopQ4WSharesRaw = balance.q4wRaw
+		}
 		pools = append(pools, pool.state)
 	}
 	for _, p := range b.pendingPos {

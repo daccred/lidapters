@@ -38,6 +38,15 @@ type PoolState struct {
 	PoolStatus       string
 	BackstopTakeRate string
 	Reserves         []ReserveState
+	// Backstop pool-level balance: the totals from this pool's PoolBalance entry
+	// in the backstop contract (total LP shares/tokens deposited against the
+	// pool, and the aggregate shares currently queued for withdrawal). These ride
+	// on PoolState rather than only on BackstopPosition so they round-trip via
+	// prior.Pools independent of whether the pool currently has any individual
+	// backstop depositors.
+	BackstopSharesRaw    string
+	BackstopTokensRaw    string
+	BackstopQ4WSharesRaw string
 }
 
 type ReserveState struct {

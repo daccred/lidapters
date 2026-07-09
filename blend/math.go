@@ -273,6 +273,41 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 					"utilization_source":       nReserve.utilizationSource,
 				},
 			})
+
+			// Per-side emission rows: only for a side with an actual on-chain
+			// EmisConfig (EPSRaw != "") — absent emissions stay absent, never a
+			// fabricated eps=0 row. APY stays "" (no emitted-token price feed
+			// exists yet to derive it); the raw eps/expiration are real decoded
+			// chain state, so a row here is never fabricated.
+			for _, side := range []struct {
+				name string
+				eps  string
+				exp  string
+			}{
+				{"supply", reserve.SupplyEmisEPSRaw, reserve.SupplyEmisExpirationRaw},
+				{"borrow", reserve.BorrowEmisEPSRaw, reserve.BorrowEmisExpirationRaw},
+			} {
+				if side.eps == "" {
+					continue
+				}
+				var expiration time.Time
+				if unix, ok := parseUnixSeconds(side.exp); ok {
+					expiration = unix
+				}
+				output.ReserveEmissions = append(output.ReserveEmissions, bindings.ReserveEmission{
+					ID:         stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID, side.name),
+					Protocol:   a.cfg.Protocol,
+					ContractID: pool.ContractID,
+					AssetID:    reserve.AssetID,
+					Side:       side.name,
+					EPSRaw:     side.eps,
+					Expiration: expiration,
+					APY:        "",
+					LedgerSeq:  input.LedgerSeq,
+					Timestamp:  input.CloseTime,
+					Metadata:   map[string]string{"apy_unavailable": "true"},
+				})
+			}
 		}
 	}
 
@@ -1053,6 +1088,21 @@ func boolString(v bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// parseUnixSeconds parses a raw unix-seconds string (as decoded from a u64
+// contract field) into a UTC time.Time. Empty or unparseable input reports
+// false rather than defaulting to the zero time being mistaken for a real
+// expiration.
+func parseUnixSeconds(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0).UTC(), true
 }
 
 func normalizedAPRInput(raw string) (decimal.Decimal, bool) {

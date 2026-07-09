@@ -494,6 +494,37 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		applyReserveData(ensureReserve(pool, asset), value)
 		finalizePoolReserves(pool)
 		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
+	case "EmisConfig":
+		// res_token_id = reserve_index*2 + side (0 = borrow/d-token, 1 =
+		// supply/b-token). The contract only lets EmisConfig be set for a
+		// res_token_id whose reserve already exists (set_pool_emissions panics
+		// otherwise), so ResList/ResConfig for this index is guaranteed to have
+		// already folded — an unresolved index is dropped defensively.
+		resTokenID, ok := variantU32(args)
+		if !ok {
+			return
+		}
+		pool := ensurePool(b.pools, change.ContractID)
+		asset, ok := pool.reserveByIndex[int32(resTokenID/2)]
+		if !ok {
+			return
+		}
+		applyReserveEmisConfig(ensureReserve(pool, asset), resTokenID%2, value)
+		finalizePoolReserves(pool)
+		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
+	case "EmisData":
+		resTokenID, ok := variantU32(args)
+		if !ok {
+			return
+		}
+		pool := ensurePool(b.pools, change.ContractID)
+		asset, ok := pool.reserveByIndex[int32(resTokenID/2)]
+		if !ok {
+			return
+		}
+		applyReserveEmisData(ensureReserve(pool, asset), resTokenID%2, value)
+		finalizePoolReserves(pool)
+		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
 	case "Positions":
 		user, ok := variantAddress(args)
 		if !ok {
@@ -577,6 +608,35 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		}
 		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), false, nil)
 		b.appendPoolUsers(change.ContractID, ledgerSeq)
+	case "EmisConfig", "EmisData":
+		// Unlike ResConfig/ResData, losing an emission entry (TTL lapse or
+		// eviction) does not remove the reserve itself — it only clears that
+		// side's emission fields, so the reserve's core lending config/data
+		// survives. The delta still reports the reserve as live with its (now
+		// emission-cleared) state.
+		resTokenID, ok := variantU32(args)
+		if !ok {
+			return
+		}
+		pool := b.pools[change.ContractID]
+		if pool == nil {
+			return
+		}
+		asset, ok := pool.reserveByIndex[int32(resTokenID/2)]
+		if !ok {
+			return
+		}
+		reserve := pool.reserves[asset]
+		if reserve == nil {
+			return
+		}
+		if variant == "EmisConfig" {
+			clearReserveEmisConfig(reserve, resTokenID%2)
+		} else {
+			clearReserveEmisData(reserve, resTokenID%2)
+		}
+		finalizePoolReserves(pool)
+		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
 	case "Positions":
 		user, ok := variantAddress(args)
 		if !ok {
@@ -890,6 +950,78 @@ func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
 	}
 	if dSupply, ok := fieldIntString(fields, "d_supply"); ok {
 		reserve.state.DSupplyRaw = dSupply
+	}
+}
+
+// applyReserveEmisConfig decodes one side's ReserveEmissionsConfig {expiration,
+// eps} onto the reserve. side is res_token_id % 2: 1 = supply/b-token, 0 =
+// borrow/d-token (matches Blend's pool contract convention).
+func applyReserveEmisConfig(reserve *reserveBuilder, side uint32, value xdr.ScVal) {
+	fields := scMapFields(value)
+	eps, epsOK := fieldIntString(fields, "eps")
+	expiration, expOK := fieldIntString(fields, "expiration")
+	if side == 1 {
+		if epsOK {
+			reserve.state.SupplyEmisEPSRaw = eps
+		}
+		if expOK {
+			reserve.state.SupplyEmisExpirationRaw = expiration
+		}
+	} else {
+		if epsOK {
+			reserve.state.BorrowEmisEPSRaw = eps
+		}
+		if expOK {
+			reserve.state.BorrowEmisExpirationRaw = expiration
+		}
+	}
+}
+
+// applyReserveEmisData decodes one side's ReserveEmissionsData {index,
+// last_time} onto the reserve. side follows the same convention as
+// applyReserveEmisConfig.
+func applyReserveEmisData(reserve *reserveBuilder, side uint32, value xdr.ScVal) {
+	fields := scMapFields(value)
+	index, indexOK := fieldIntString(fields, "index")
+	lastTime, lastOK := fieldIntString(fields, "last_time")
+	if side == 1 {
+		if indexOK {
+			reserve.state.SupplyEmisIndexRaw = index
+		}
+		if lastOK {
+			reserve.state.SupplyEmisLastTimeRaw = lastTime
+		}
+	} else {
+		if indexOK {
+			reserve.state.BorrowEmisIndexRaw = index
+		}
+		if lastOK {
+			reserve.state.BorrowEmisLastTimeRaw = lastTime
+		}
+	}
+}
+
+// clearReserveEmisConfig / clearReserveEmisData drop one side's emission
+// fields back to absent (empty string) when its storage entry is evicted or
+// TTL-lapses — the reserve itself is untouched, only that side's emission
+// data goes away.
+func clearReserveEmisConfig(reserve *reserveBuilder, side uint32) {
+	if side == 1 {
+		reserve.state.SupplyEmisEPSRaw = ""
+		reserve.state.SupplyEmisExpirationRaw = ""
+	} else {
+		reserve.state.BorrowEmisEPSRaw = ""
+		reserve.state.BorrowEmisExpirationRaw = ""
+	}
+}
+
+func clearReserveEmisData(reserve *reserveBuilder, side uint32) {
+	if side == 1 {
+		reserve.state.SupplyEmisIndexRaw = ""
+		reserve.state.SupplyEmisLastTimeRaw = ""
+	} else {
+		reserve.state.BorrowEmisIndexRaw = ""
+		reserve.state.BorrowEmisLastTimeRaw = ""
 	}
 }
 
@@ -1225,6 +1357,19 @@ func variantAddress(args []xdr.ScVal) (string, bool) {
 		return "", false
 	}
 	return scAddress(args[0])
+}
+
+// variantU32 reads a variant's sole u32 argument — the shape EmisConfig(u32)
+// and EmisData(u32) use to key by res_token_id.
+func variantU32(args []xdr.ScVal) (uint32, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	v, ok := scInt32(args[0])
+	if !ok || v < 0 {
+		return 0, false
+	}
+	return uint32(v), true
 }
 
 func backstopPoolUser(args []xdr.ScVal) (string, string, bool) {

@@ -230,6 +230,25 @@ type Backstop struct {
 	Metadata         map[string]string
 }
 
+// ReserveEmission is one side (supply/b-token or borrow/d-token) of a
+// reserve's emission config, keyed like Reserve plus Side. APY is "" when it
+// cannot be derived (e.g. no emitted-token price feed) — never a fabricated
+// value. A side with no active emission config is simply absent from the
+// slice, not emitted with a zero EPS.
+type ReserveEmission struct {
+	ID         string
+	Protocol   string
+	ContractID string
+	AssetID    string
+	Side       string // "supply" | "borrow"
+	EPSRaw     string
+	Expiration time.Time
+	APY        string
+	LedgerSeq  int64
+	Timestamp  time.Time
+	Metadata   map[string]string
+}
+
 type Contract struct {
 	ID              string
 	Address         string
@@ -255,12 +274,13 @@ type QuarantineEvent struct {
 }
 
 type TransformOutput struct {
-	LedgerSeq  int64
-	Activities []Activity
-	Positions  []Position
-	Summaries  []PositionSummary
-	Reserves   []Reserve
-	Backstops  []Backstop
-	Contracts  []Contract
-	Quarantine []QuarantineEvent
+	LedgerSeq        int64
+	Activities       []Activity
+	Positions        []Position
+	Summaries        []PositionSummary
+	Reserves         []Reserve
+	ReserveEmissions []ReserveEmission
+	Backstops        []Backstop
+	Contracts        []Contract
+	Quarantine       []QuarantineEvent
 }

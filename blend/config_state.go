@@ -144,6 +144,13 @@ func (a *Adapter) ConfigSchema() []bindings.ConfigTableSchema {
 				{Name: "supply_cap", SQLType: "numeric", Expr: "NULLIF(payload->>'supply_cap','')::numeric"},
 				factor("reactivity", "reactivity"),
 				{Name: "enabled", SQLType: "boolean", Expr: "NULLIF(payload->>'enabled','')::boolean"},
+				// Emission config (eps/expiration), not emission data (index/last_time
+				// re-folds from bronze, same split as ResConfig vs ResData above). Raw
+				// token-amount-per-second, so plain numeric like supply_cap (no /1e7).
+				{Name: "supply_emis_eps", SQLType: "numeric", Expr: "NULLIF(payload->>'supply_emis_eps','')::numeric"},
+				{Name: "supply_emis_expiration", SQLType: "bigint", Expr: "NULLIF(payload->>'supply_emis_expiration','')::bigint"},
+				{Name: "borrow_emis_eps", SQLType: "numeric", Expr: "NULLIF(payload->>'borrow_emis_eps','')::numeric"},
+				{Name: "borrow_emis_expiration", SQLType: "bigint", Expr: "NULLIF(payload->>'borrow_emis_expiration','')::bigint"},
 			},
 			Indexes: []bindings.ConfigIndex{
 				{Name: "idx_blend_reserve_config_pool", Columns: []string{"pool_id"}},
@@ -196,6 +203,12 @@ type reserveConfigBody struct {
 	SupplyCap  string `json:"supply_cap"`
 	Reactivity string `json:"reactivity"`
 	Enabled    bool   `json:"enabled"`
+	// Emission config only (eps/expiration) — emission DATA (index/last_time)
+	// re-folds from bronze, same split as ResData above.
+	SupplyEmisEPS        string `json:"supply_emis_eps"`
+	SupplyEmisExpiration string `json:"supply_emis_expiration"`
+	BorrowEmisEPS        string `json:"borrow_emis_eps"`
+	BorrowEmisExpiration string `json:"borrow_emis_expiration"`
 }
 
 // --- record emission (chain-signal, pure) -----------------------------------
@@ -266,9 +279,27 @@ func (a *Adapter) ConfigRecords(next *bindings.LedgerState, changes []bindings.C
 			}
 			continue
 		}
-		if variant, args, ok := scVariant(key); ok && variant == "ResConfig" {
-			if asset, ok := variantAddress(args); ok {
-				dirtyReserve[reserveRef{ch.ContractID, asset}] = removed
+		if variant, args, ok := scVariant(key); ok {
+			switch variant {
+			case "ResConfig":
+				if asset, ok := variantAddress(args); ok {
+					dirtyReserve[reserveRef{ch.ContractID, asset}] = removed
+				}
+			case "EmisConfig":
+				// EmisConfig is config (persisted); its sibling EmisData is accrual
+				// data and re-folds from bronze, so it is never classified here. An
+				// EmisConfig change only ever re-marshals the reserve's current
+				// state (which by now reflects this ledger's decode) — it never
+				// tombstones the reserve record, even when the EmisConfig entry
+				// itself was evicted/expired, because the reserve's core
+				// (ResConfig-derived) config is unaffected by an emission change.
+				if resTokenID, ok := variantU32(args); ok {
+					if pool, ok := poolByID[ch.ContractID]; ok {
+						if reserve, ok := reserveByIndex(pool, int32(resTokenID/2)); ok {
+							dirtyReserve[reserveRef{ch.ContractID, reserve.AssetID}] = false
+						}
+					}
+				}
 			}
 		}
 	}
@@ -371,6 +402,15 @@ func reserveByAsset(pool contracts.PoolState, assetID string) (contracts.Reserve
 	return contracts.ReserveState{}, false
 }
 
+func reserveByIndex(pool contracts.PoolState, index int32) (contracts.ReserveState, bool) {
+	for _, r := range pool.Reserves {
+		if r.ReserveIndex == index {
+			return r, true
+		}
+	}
+	return contracts.ReserveState{}, false
+}
+
 func oraclePriceByIndex(oracle contracts.OracleState, index int64) (string, bool) {
 	for _, p := range oracle.Prices {
 		if p.Index == index {
@@ -422,6 +462,11 @@ func marshalReserveBody(poolID string, r contracts.ReserveState) []byte {
 		SupplyCap:  r.SupplyCapRaw,
 		Reactivity: r.ReactivityRaw,
 		Enabled:    r.Enabled,
+
+		SupplyEmisEPS:        r.SupplyEmisEPSRaw,
+		SupplyEmisExpiration: r.SupplyEmisExpirationRaw,
+		BorrowEmisEPS:        r.BorrowEmisEPSRaw,
+		BorrowEmisExpiration: r.BorrowEmisExpirationRaw,
 	})
 }
 
@@ -506,6 +551,11 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 				SupplyCapRaw:  body.SupplyCap,
 				ReactivityRaw: body.Reactivity,
 				Enabled:       body.Enabled,
+
+				SupplyEmisEPSRaw:        body.SupplyEmisEPS,
+				SupplyEmisExpirationRaw: body.SupplyEmisExpiration,
+				BorrowEmisEPSRaw:        body.BorrowEmisEPS,
+				BorrowEmisExpirationRaw: body.BorrowEmisExpiration,
 			})
 		}
 	}

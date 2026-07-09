@@ -51,6 +51,13 @@ type LedgerState struct {
 	// and price-only ledgers would map nothing). It is the oracle analog of
 	// PendingUserPositions. Carried state only — never emitted to gold.
 	Oracles []contracts.OracleState
+	// Assets carries each registered token contract's decoded human-readable
+	// identity (SAC AssetInfo or SEP-41 METADATA). Like the oracle instance, a
+	// token's identity entry is written once at deploy and never re-emitted, so
+	// without carrying this, any ledger after the deploy would lose the decoded
+	// symbol/name/decimals. Carried state only — never emitted to gold; it feeds
+	// Reserve.Metadata / Activity.AssetSymbol in the transform instead.
+	Assets []contracts.AssetMetadata
 }
 
 // ContractDataChange is the shared vocabulary between the relay's

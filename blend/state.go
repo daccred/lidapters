@@ -20,6 +20,7 @@ import (
 
 	"github.com/daccred/lidapters/bindings"
 	"github.com/daccred/lidapters/blend/contracts"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -33,14 +34,17 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 }
 
 // OwnsContract reports whether contractID belongs to Blend. Ownership is the
-// runtime-discovered pool/backstop/oracle set fed in via RegisterContracts; it
-// is config-like (not per-ledger scratch), so it does not break DecodeState
-// purity.
+// runtime-discovered pool/backstop/oracle set fed in via RegisterContracts, plus
+// the registered token-contract set fed in via RegisterAssetContracts; both are
+// config-like (not per-ledger scratch), so neither breaks DecodeState purity.
 func (a *Adapter) OwnsContract(contractID string) bool {
 	if contractID == "" {
 		return false
 	}
-	_, ok := a.contracts[contractID]
+	if _, ok := a.contracts[contractID]; ok {
+		return true
+	}
+	_, ok := a.assets[contractID]
 	return ok
 }
 
@@ -59,6 +63,24 @@ func (a *Adapter) RegisterContracts(ids ...string) {
 	}
 }
 
+// RegisterAssetContracts adds token-contract IDs (a pool's reserve assets) to
+// the registered asset set. Idempotent; ignores blank IDs. Called by the
+// relay's projector edge as a pool's reserve list reveals its reserve assets
+// (it is NOT called from the pure DecodeState path). A registered asset's
+// contract_data is folded on the SAC/SEP-41 decode path in apply(), ahead of
+// and instead of the generic pool-instance branch — see the assets field
+// comment on Adapter.
+func (a *Adapter) RegisterAssetContracts(ids ...string) {
+	if a.assets == nil {
+		a.assets = map[string]struct{}{}
+	}
+	for _, id := range ids {
+		if id != "" {
+			a.assets[id] = struct{}{}
+		}
+	}
+}
+
 type typedStateDelta struct {
 	LedgerSeq  int64
 	EntityType string
@@ -73,11 +95,17 @@ type blendStateBuilder struct {
 	backstopPools map[string]backstopPoolBalance
 	backstopUsers map[string]backstopUserBalance
 	oracles       map[string]*oracleBuilder
+	assets        map[string]contracts.AssetMetadata
 	// owned is the adapter's owned-contract set, threaded in so the reducer can
 	// tell an oracle's contract_data apart from a pool's. It is read-only config,
 	// not per-ledger scratch, so it does not break the run-twice purity guarantee.
-	owned  map[string]struct{}
-	deltas []typedStateDelta
+	owned map[string]struct{}
+	// ownedAssets is the adapter's registered token-contract set, threaded in the
+	// same read-only-config way as owned, so the reducer can route a registered
+	// asset's contract_data onto the SAC/SEP-41 decode path ahead of the generic
+	// pool-instance branch.
+	ownedAssets map[string]struct{}
+	deltas      []typedStateDelta
 }
 
 // oracleBuilder accumulates the parts of a Blend price oracle that a fold needs
@@ -131,6 +159,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 		backstopPools: map[string]backstopPoolBalance{},
 		backstopUsers: map[string]backstopUserBalance{},
 		oracles:       map[string]*oracleBuilder{},
+		assets:        map[string]contracts.AssetMetadata{},
 	}
 }
 
@@ -141,6 +170,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64) (bindings.LedgerState, []typedStateDelta) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
+	b.ownedAssets = a.assets
 	if prior != nil {
 		b.loadPrior(prior)
 	}
@@ -231,6 +261,12 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 			ob.priceByIndex[price.Index] = price.PriceRaw
 		}
 	}
+	for _, asset := range prior.Assets {
+		// A token's AssetInfo/METADATA instance is written once at deploy and never
+		// re-emitted, so it must be restored here for it to survive past the ledger
+		// it was decoded on.
+		b.assets[asset.ContractID] = asset
+	}
 }
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
@@ -289,7 +325,25 @@ func (b *blendStateBuilder) build() bindings.LedgerState {
 		Backstops:            backstops,
 		PendingUserPositions: pending,
 		Oracles:              b.buildOracles(),
+		Assets:               b.buildAssets(),
 	}
+}
+
+// buildAssets snapshots each registered asset contract's carried decode state
+// (symbol, name, decimals) into the returned LedgerState so the next ledger's
+// loadPrior can restore it — the instance entry is written once at deploy and
+// never re-emitted, the same carry requirement as Oracles. Sorted by contract
+// ID so the run-twice output stays byte-identical.
+func (b *blendStateBuilder) buildAssets() []contracts.AssetMetadata {
+	if len(b.assets) == 0 {
+		return nil
+	}
+	assets := make([]contracts.AssetMetadata, 0, len(b.assets))
+	for _, meta := range b.assets {
+		assets = append(assets, meta)
+	}
+	sort.Slice(assets, func(i, j int) bool { return assets[i].ContractID < assets[j].ContractID })
+	return assets
 }
 
 // buildOracles snapshots each oracle's carried decode state (decimals,
@@ -367,6 +421,18 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			b.applyOraclePrice(change.ContractID, key, value)
 			return
 		}
+	}
+
+	// A registered token contract's contract_data is always decoded on the
+	// SAC/SEP-41 asset path, and never falls through to the generic pool-instance
+	// branch below — even on a decode miss or an unrecognized key/value shape (a
+	// balance/allowance entry, an unsupported layout, ...). A SAC's instance
+	// carries no wasm executable and would fall through harmlessly, but a
+	// wasm-backed SEP-41 token's instance DOES carry one and would otherwise be
+	// misdecoded as a phantom pool by the wasm-hash sniff below.
+	if _, isAsset := b.ownedAssets[change.ContractID]; isAsset {
+		b.applyAssetInstance(change.ContractID, value)
+		return
 	}
 
 	if wasmHash, ok := contractInstanceWasmHash(value); ok {
@@ -457,6 +523,17 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 }
 
 func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
+	if _, isAsset := b.ownedAssets[change.ContractID]; isAsset {
+		// Any change on a registered asset contract is fully absorbed here — it never
+		// falls through to the pool delete logic below. Only the instance entry
+		// itself going not-live (evicted or TTL-lapsed) clears the decoded identity;
+		// a registered asset also emits Balance/Allowance persistent-storage deletes
+		// that carry no bearing on its symbol/name/decimals and must not wipe them.
+		if key.Type == xdr.ScValTypeScvLedgerKeyContractInstance {
+			delete(b.assets, change.ContractID)
+		}
+		return
+	}
 	if _, owned := b.owned[change.ContractID]; owned && isOraclePriceKey(key) {
 		// A price entry is temporary storage: once it is evicted or its TTL lapses
 		// the price is gone on-chain, so drop it here too. This is the storage-level
@@ -898,6 +975,103 @@ func (b *blendStateBuilder) applyOraclePrice(oracleID string, key, value xdr.ScV
 	oracle.priceByIndex[index] = priceRaw
 }
 
+// applyAssetInstance decodes a registered token contract's contract-instance
+// entry into human-readable {symbol, name, decimals}. Like a Blend pool's
+// Config/Backstop (applyPoolInstanceStorage), a token's AssetInfo/METADATA live
+// INSIDE the instance's storage map, not as top-level contract_data entries —
+// so this reads instance.Storage the same way. It recognizes two layouts, keyed
+// within that map: a Stellar Asset Contract's AssetInfo (key
+// vec[Symbol("AssetInfo")], value Native/AlphaNum4/AlphaNum12) and a SEP-41
+// token's METADATA (bare key Symbol("METADATA"), value {decimal, name,
+// symbol}). A change whose value is not instance-shaped (a registered asset
+// contract also emits Balance/Allowance persistent entries) or whose storage
+// matches neither layout decodes to nothing: an absent symbol stays absent, it
+// is never guessed.
+func (b *blendStateBuilder) applyAssetInstance(contractID string, value xdr.ScVal) {
+	instance, ok := value.GetInstance()
+	if !ok || instance.Storage == nil {
+		return
+	}
+	for _, entry := range []xdr.ScMapEntry(*instance.Storage) {
+		if variant, args, ok := scVariant(entry.Key); ok && variant == "AssetInfo" && len(args) == 0 {
+			if meta, ok := decodeSACAssetInfo(contractID, entry.Val); ok {
+				b.assets[contractID] = meta
+			}
+			continue
+		}
+		if sym, ok := scSymbol(entry.Key); ok && sym == "METADATA" {
+			if meta, ok := decodeSEP41Metadata(contractID, entry.Val); ok {
+				b.assets[contractID] = meta
+			}
+			continue
+		}
+	}
+}
+
+// decodeSACAssetInfo decodes a Stellar Asset Contract's AssetInfo instance
+// value, matching soroban-env-host's stellar_asset_contract AssetInfo enum:
+// Native, AlphaNum4{asset_code, issuer}, AlphaNum12{asset_code, issuer}. A
+// SAC's decimals is always 7 — the classic Stellar asset convention the
+// contract enforces, not a value stored on-chain.
+func decodeSACAssetInfo(contractID string, value xdr.ScVal) (contracts.AssetMetadata, bool) {
+	variant, args, ok := scVariant(value)
+	if !ok {
+		return contracts.AssetMetadata{}, false
+	}
+	switch variant {
+	case "Native":
+		return contracts.AssetMetadata{ContractID: contractID, Symbol: "native", Name: "native", Decimals: 7}, true
+	case "AlphaNum4", "AlphaNum12":
+		if len(args) == 0 {
+			return contracts.AssetMetadata{}, false
+		}
+		fields := scMapFields(args[0])
+		code, ok := scSymbol(fields["asset_code"])
+		if !ok || code == "" {
+			return contracts.AssetMetadata{}, false
+		}
+		issuer, ok := scValBytes(fields["issuer"])
+		if !ok {
+			return contracts.AssetMetadata{}, false
+		}
+		issuerAddr, err := strkey.Encode(strkey.VersionByteAccountID, issuer)
+		if err != nil {
+			return contracts.AssetMetadata{}, false
+		}
+		return contracts.AssetMetadata{
+			ContractID: contractID,
+			Symbol:     code,
+			Name:       code + ":" + issuerAddr,
+			Decimals:   7,
+		}, true
+	default:
+		return contracts.AssetMetadata{}, false
+	}
+}
+
+// decodeSEP41Metadata decodes a custom SEP-41 token's METADATA instance value
+// (soroban-token-sdk TokenMetadata: {decimal, name, symbol}) into
+// {symbol, name, decimals}.
+func decodeSEP41Metadata(contractID string, value xdr.ScVal) (contracts.AssetMetadata, bool) {
+	fields := scMapFields(value)
+	if fields == nil {
+		return contracts.AssetMetadata{}, false
+	}
+	decimals, ok := fieldInt32(fields, "decimal")
+	if !ok {
+		return contracts.AssetMetadata{}, false
+	}
+	name, ok := scSymbol(fields["name"])
+	if !ok {
+		return contracts.AssetMetadata{}, false
+	}
+	symbol, ok := scSymbol(fields["symbol"])
+	if !ok {
+		return contracts.AssetMetadata{}, false
+	}
+	return contracts.AssetMetadata{ContractID: contractID, Symbol: symbol, Name: name, Decimals: decimals}, true
+}
+
 // resolveOraclePrices threads each oracle's decoded prices onto the reserves
 // that reference it, matching a reserve to its price by the asset's index in its
 // pool's oracle. The oracle's asset->index map and prices are carried across
@@ -1126,6 +1300,17 @@ func scSymbol(v xdr.ScVal) (string, bool) {
 func scAddress(v xdr.ScVal) (string, bool) {
 	s := scValAddress(v)
 	return s, s != ""
+}
+
+// scValBytes extracts raw bytes from an ScvBytes value — used for a SAC
+// AlphaNum4/12 AssetInfo's issuer field, which is a BytesN<32> (the issuer
+// account's raw Ed25519 public key), not an ScAddress.
+func scValBytes(v xdr.ScVal) ([]byte, bool) {
+	b, ok := v.GetBytes()
+	if !ok {
+		return nil, false
+	}
+	return []byte(b), true
 }
 
 func scInt64(v xdr.ScVal) (int64, bool) {

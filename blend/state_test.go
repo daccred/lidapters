@@ -198,6 +198,70 @@ func TestDecodeState_EvictionTTLRestore(t *testing.T) {
 	}
 }
 
+// TestBackstopPoolBalanceRoundTripsWithoutUsers decodes a pool's PoolBalance
+// entry (shares/tokens/q4w) and asserts it survives a second ledger fold with
+// no new backstop changes and zero backstop users — the pool-level total must
+// round-trip via prior.Pools, not via prior.Backstops, since a pool can have a
+// non-zero backstop balance (e.g. right after a config-only reload restores
+// prior state) before any individual user balance has decoded.
+func TestBackstopPoolBalanceRoundTripsWithoutUsers(t *testing.T) {
+	t.Parallel()
+
+	adapter := newTestAdapter(t)
+	poolID := validContractString(t, 1)
+	backstopID := validContractString(t, 4)
+
+	changes := []bindings.ContractDataChange{
+		stateChange(t, poolID, symbolVal(t, "Config"), mapVal(t, map[string]xdr.ScVal{
+			"oracle":     contractAddressVal(t, 3),
+			"bstop_rate": u32Val(1_000_000),
+			"status":     u32Val(1),
+		})),
+		stateChange(t, poolID, symbolVal(t, "Backstop"), contractAddressVal(t, 4)),
+		stateChange(t, backstopID, variantVal(t, "PoolBalance", contractAddressVal(t, 1)), mapVal(t, map[string]xdr.ScVal{
+			"shares": i128Val(8000),
+			"tokens": i128Val(10000),
+			"q4w":    i128Val(800),
+		})),
+	}
+
+	first, err := adapter.DecodeState(nil, changes, 100)
+	if err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	pool := findPool(t, first, poolID)
+	if pool.BackstopSharesRaw != "8000" || pool.BackstopTokensRaw != "10000" || pool.BackstopQ4WSharesRaw != "800" {
+		t.Fatalf("unexpected backstop pool balance: shares=%q tokens=%q q4w=%q",
+			pool.BackstopSharesRaw, pool.BackstopTokensRaw, pool.BackstopQ4WSharesRaw)
+	}
+	if len(first.Backstops) != 0 {
+		t.Fatalf("expected zero per-user backstop positions, got %d", len(first.Backstops))
+	}
+
+	// A later ledger with no backstop-affecting change must still carry the
+	// pool's backstop total forward from prior.
+	second, err := adapter.DecodeState(first, nil, 101)
+	if err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	pool2 := findPool(t, second, poolID)
+	if pool2.BackstopSharesRaw != "8000" || pool2.BackstopTokensRaw != "10000" || pool2.BackstopQ4WSharesRaw != "800" {
+		t.Fatalf("backstop pool balance did not round-trip: shares=%q tokens=%q q4w=%q",
+			pool2.BackstopSharesRaw, pool2.BackstopTokensRaw, pool2.BackstopQ4WSharesRaw)
+	}
+}
+
+func findPool(t *testing.T, state *bindings.LedgerState, contractID string) contracts.PoolState {
+	t.Helper()
+	for _, pool := range state.Pools {
+		if pool.ContractID == contractID {
+			return pool
+		}
+	}
+	t.Fatalf("pool %s not found", contractID)
+	return contracts.PoolState{}
+}
+
 func hasPool(state *bindings.LedgerState, contractID string) bool {
 	for _, pool := range state.Pools {
 		if pool.ContractID == contractID {

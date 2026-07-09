@@ -242,6 +242,96 @@ func TestBackstopShareAndTokenAccounting(t *testing.T) {
 	}
 }
 
+// TestBackstopPoolTotalEmittedOnReserves covers the pool-level backstop total
+// (relay.lightgate.xyz#25 / orion.lightgate.xyz#37): a per-pool aggregate,
+// distinct from the per-user bindings.Position rows TestBackstopShareAndTokenAccounting
+// covers above. It must emit from PoolState alone, with zero backstop users —
+// the whole point of carrying these totals on PoolState instead of only on
+// BackstopPosition.
+func TestBackstopPoolTotalEmittedOnReserves(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 5,
+		CloseTime: time.Unix(40, 0).UTC(),
+		State: &bindings.LedgerState{
+			Pools: []contracts.PoolState{{
+				ContractID:           "CPOOL",
+				WasmHash:             "wasm-v2",
+				BackstopContract:     "CBACKSTOP",
+				BackstopSharesRaw:    "8000",
+				BackstopTokensRaw:    "10000",
+				BackstopQ4WSharesRaw: "800",
+			}},
+			// Deliberately no Backstops (no individual depositors decoded yet) —
+			// the pool-level total must not depend on user rows existing.
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	if len(out.Backstops) != 1 {
+		t.Fatalf("expected one pool-level backstop total, got %d", len(out.Backstops))
+	}
+	bt := out.Backstops[0]
+	if bt.ContractID != "CPOOL" {
+		t.Fatalf("expected pool contract CPOOL, got %s", bt.ContractID)
+	}
+	if bt.BackstopContract != "CBACKSTOP" {
+		t.Fatalf("expected backstop contract CBACKSTOP, got %s", bt.BackstopContract)
+	}
+	if bt.SharesRaw != "8000" {
+		t.Fatalf("expected total shares 8000, got %s", bt.SharesRaw)
+	}
+	if bt.LPTokensRaw != "10000" {
+		t.Fatalf("expected total LP tokens 10000, got %s", bt.LPTokensRaw)
+	}
+	if bt.Q4WSharesRaw != "800" {
+		t.Fatalf("expected q4w shares 800, got %s", bt.Q4WSharesRaw)
+	}
+	if bt.Q4WPct != "0.1" {
+		t.Fatalf("expected q4w_pct fraction 0.1, got %s", bt.Q4WPct)
+	}
+	if bt.USDValue != "" {
+		t.Fatalf("expected NULL usd_value (LP pricing unavailable), got %s", bt.USDValue)
+	}
+}
+
+// TestBackstopPoolTotalAbsentWithoutBackstopRef asserts a pool that has not
+// wired a backstop contract yet emits no backstop total row (never a
+// fabricated all-empty row).
+func TestBackstopPoolTotalAbsentWithoutBackstopRef(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 6,
+		CloseTime: time.Unix(50, 0).UTC(),
+		State: &bindings.LedgerState{
+			Pools: []contracts.PoolState{{
+				ContractID: "CPOOL",
+				WasmHash:   "wasm-v2",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Backstops) != 0 {
+		t.Fatalf("expected no backstop total without a backstop ref, got %d", len(out.Backstops))
+	}
+}
+
 func TestReservePositionAPRMaterializesOnlyWhenEmissionsKnown(t *testing.T) {
 	t.Parallel()
 

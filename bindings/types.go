@@ -199,6 +199,30 @@ type Reserve struct {
 	Metadata       map[string]string
 }
 
+// Backstop is the pool-level twin of Reserve: the aggregate backstop capital
+// protecting one pool (every depositor's shares/tokens summed, plus the
+// aggregate queued-for-withdrawal fraction), not a single user's deposit — a
+// user's own backstop position already rides on Position with
+// PositionType=backstop. USDValue follows the same nullable-until-priced rule
+// as Reserve/Position: empty until LP-token pricing (BLND/USDC component +
+// oracle price) is wired, never a fabricated zero.
+type Backstop struct {
+	ID               string
+	Protocol         string
+	ContractID       string // the pool this backstop protects
+	BackstopContract string
+	SharesRaw        string
+	LPTokensRaw      string
+	Q4WSharesRaw     string
+	Q4WPct           string
+	BLNDAmountRaw    string
+	USDCAmountRaw    string
+	USDValue         string
+	LedgerSeq        int64
+	Timestamp        time.Time
+	Metadata         map[string]string
+}
+
 type Contract struct {
 	ID              string
 	Address         string
@@ -229,6 +253,7 @@ type TransformOutput struct {
 	Positions  []Position
 	Summaries  []PositionSummary
 	Reserves   []Reserve
+	Backstops  []Backstop
 	Contracts  []Contract
 	Quarantine []QuarantineEvent
 }

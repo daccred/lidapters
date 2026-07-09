@@ -162,6 +162,33 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			},
 		})
 
+		// Pool-level backstop total: the aggregate capital protecting this pool
+		// (every depositor's shares/tokens summed), not a single user's deposit —
+		// that is the per-user bindings.Position with PositionType=backstop built
+		// below. Emitted whenever the pool declares a backstop ref, even before its
+		// PoolBalance entry has been observed (raw fields empty -> NULL in gold).
+		// q4w_pct is a fraction (shares queued / total shares), not a percentage.
+		if pool.BackstopContract != "" {
+			totalShares := parseDecimalOrZero(pool.BackstopSharesRaw)
+			q4wShares := parseDecimalOrZero(pool.BackstopQ4WSharesRaw)
+			q4wPct := ""
+			if !totalShares.IsZero() {
+				q4wPct = numString(q4wShares.Div(totalShares))
+			}
+			output.Backstops = append(output.Backstops, bindings.Backstop{
+				ID:               stableID(a.cfg.Protocol, pool.ContractID, "backstop_total"),
+				Protocol:         a.cfg.Protocol,
+				ContractID:       pool.ContractID,
+				BackstopContract: pool.BackstopContract,
+				SharesRaw:        pool.BackstopSharesRaw,
+				LPTokensRaw:      pool.BackstopTokensRaw,
+				Q4WSharesRaw:     pool.BackstopQ4WSharesRaw,
+				Q4WPct:           q4wPct,
+				LedgerSeq:        input.LedgerSeq,
+				Timestamp:        input.CloseTime,
+			})
+		}
+
 		for _, reserve := range pool.Reserves {
 			// A reserve whose ResData half has not been folded yet — config present
 			// but no b/d rate or supply — is a cold-start artifact: config-only reload

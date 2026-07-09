@@ -8,6 +8,7 @@ import (
 
 	"github.com/daccred/lidapters/bindings"
 	"github.com/daccred/lidapters/blend/contracts"
+	"github.com/shopspring/decimal"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -645,6 +646,65 @@ func TestStateMetadataUsesCanonicalOracleKey(t *testing.T) {
 	reserve := out.Reserves[0]
 	if reserve.Metadata["oracle_price_usd"] == "" {
 		t.Fatalf("expected reserve canonical oracle_price_usd metadata")
+	}
+}
+
+// TestReserveMetadataSurfacesEnabledAndReactivity is the relay#27 gold-surfacing
+// regression: the per-reserve enabled flag and reactivity constant decoded from
+// ResConfig (state.go) must reach the reserve's output Metadata map, which is
+// what relay folds into blend_reserve_snapshots' reserve_config/metadata JSONB —
+// the table the API actually reads. Landing the fields on contracts.ReserveState
+// alone (state.go) is not enough; math.go's output construction must carry them
+// too, or a wallet integration filtering on "enabled" never sees the value.
+func TestReserveMetadataSurfacesEnabledAndReactivity(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{
+		V2WasmHashes: map[string]struct{}{
+			"known-v2": {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 100,
+		CloseTime: time.Unix(1000, 0).UTC(),
+		State: &bindings.LedgerState{
+			Pools: []contracts.PoolState{
+				{
+					ContractID: "CPOOL",
+					WasmHash:   "known-v2",
+					Reserves: []contracts.ReserveState{
+						{
+							AssetID:       "CASSET",
+							AssetDecimals: 7,
+							BRateRaw:      "10000000",
+							DRateRaw:      "10000000",
+							BSupplyRaw:    "10000000",
+							DSupplyRaw:    "0",
+							Enabled:       true,
+							ReactivityRaw: "20000",
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Reserves) == 0 {
+		t.Fatalf("expected reserves from state")
+	}
+	reserve := out.Reserves[0]
+	if reserve.Metadata["enabled"] != "true" {
+		t.Fatalf("expected reserve enabled metadata true, got %q", reserve.Metadata["enabled"])
+	}
+	wantReactivity := decimal.RequireFromString("20000").Div(factorScaleDecimal).String()
+	if reserve.Metadata["reactivity"] != wantReactivity {
+		t.Fatalf("expected reserve reactivity metadata %s, got %q", wantReactivity, reserve.Metadata["reactivity"])
 	}
 }
 

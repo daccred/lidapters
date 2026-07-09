@@ -45,6 +45,16 @@ func representativeChanges(t *testing.T) []bindings.ContractDataChange {
 			"b_supply": i128Val(100),
 			"d_supply": i128Val(20),
 		})),
+		// res_token_id = reserve_index*2 + side; reserve index above is 1, so
+		// supply (side 1) = 3, borrow (side 0) = 2.
+		stateChange(t, poolID, variantVal(t, "EmisConfig", u32Val(3)), mapVal(t, map[string]xdr.ScVal{
+			"eps":        u64Val(1_000_000),
+			"expiration": u64Val(1_800_000_000),
+		})),
+		stateChange(t, poolID, variantVal(t, "EmisData", u32Val(3)), mapVal(t, map[string]xdr.ScVal{
+			"index":     i128Val(0),
+			"last_time": u64Val(1_700_000_000),
+		})),
 		stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 5)), mapVal(t, map[string]xdr.ScVal{
 			"supply":      intMapVal(t, map[uint32]xdr.ScVal{1: i128Val(700)}),
 			"collateral":  intMapVal(t, map[uint32]xdr.ScVal{1: i128Val(300)}),
@@ -141,6 +151,105 @@ func TestApplyReserveConfig_MissingEnabledDefaultsFalse(t *testing.T) {
 	}
 	if reserve.state.ReactivityRaw != "" {
 		t.Fatalf("expected empty ReactivityRaw when key absent, got %q", reserve.state.ReactivityRaw)
+	}
+}
+
+// TestDecodeState_ReserveEmissions is the relay#26 fold gate: EmisConfig(3)
+// (res_token_id = reserve_index*2 + side, side 1 = supply) and EmisData(3) on
+// the pool must resolve — via reserveByIndex, itself populated by ResList/
+// ResConfig earlier in the same change set — onto the one reserve at index 1,
+// and land on its supply side only (the borrow side never got a config, so it
+// must stay absent, never a fabricated "0").
+func TestDecodeState_ReserveEmissions(t *testing.T) {
+	t.Parallel()
+
+	adapter := newTestAdapter(t)
+	state, err := adapter.DecodeState(nil, representativeChanges(t), 123)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(state.Pools) != 1 || len(state.Pools[0].Reserves) != 1 {
+		t.Fatalf("expected 1 pool with 1 reserve, got pools=%d", len(state.Pools))
+	}
+	reserve := state.Pools[0].Reserves[0]
+	if reserve.SupplyEmisEPSRaw != "1000000" {
+		t.Fatalf("expected SupplyEmisEPSRaw=1000000, got %q", reserve.SupplyEmisEPSRaw)
+	}
+	if reserve.SupplyEmisExpirationRaw != "1800000000" {
+		t.Fatalf("expected SupplyEmisExpirationRaw=1800000000, got %q", reserve.SupplyEmisExpirationRaw)
+	}
+	if reserve.SupplyEmisIndexRaw != "0" {
+		t.Fatalf("expected SupplyEmisIndexRaw=0, got %q", reserve.SupplyEmisIndexRaw)
+	}
+	if reserve.SupplyEmisLastTimeRaw != "1700000000" {
+		t.Fatalf("expected SupplyEmisLastTimeRaw=1700000000, got %q", reserve.SupplyEmisLastTimeRaw)
+	}
+	if reserve.BorrowEmisEPSRaw != "" {
+		t.Fatalf("expected absent BorrowEmisEPSRaw (no config set), got %q", reserve.BorrowEmisEPSRaw)
+	}
+	if reserve.BorrowEmisExpirationRaw != "" {
+		t.Fatalf("expected absent BorrowEmisExpirationRaw (no config set), got %q", reserve.BorrowEmisExpirationRaw)
+	}
+}
+
+// TestDecodeState_ReserveEmissions_UnresolvedIndexDropped guards the defensive
+// drop path: an EmisConfig for a res_token_id whose reserve index is unknown
+// (ResList/ResConfig never folded for it) must be silently ignored rather than
+// panic or synthesize a reserve out of nothing.
+func TestDecodeState_ReserveEmissions_UnresolvedIndexDropped(t *testing.T) {
+	t.Parallel()
+
+	adapter := newTestAdapter(t)
+	poolID := validContractString(t, 9)
+	changes := []bindings.ContractDataChange{
+		stateChange(t, poolID, symbolVal(t, "Config"), mapVal(t, map[string]xdr.ScVal{
+			"oracle":     contractAddressVal(t, 3),
+			"bstop_rate": u32Val(1_000_000),
+			"status":     u32Val(1),
+		})),
+		// No ResList/ResConfig for this pool — res_token_id 3 cannot resolve.
+		stateChange(t, poolID, variantVal(t, "EmisConfig", u32Val(3)), mapVal(t, map[string]xdr.ScVal{
+			"eps":        u64Val(1_000_000),
+			"expiration": u64Val(1_800_000_000),
+		})),
+	}
+	state, err := adapter.DecodeState(nil, changes, 123)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(state.Pools) != 1 {
+		t.Fatalf("expected 1 pool, got %d", len(state.Pools))
+	}
+	if len(state.Pools[0].Reserves) != 0 {
+		t.Fatalf("expected no reserves synthesized from an unresolved EmisConfig, got %d", len(state.Pools[0].Reserves))
+	}
+}
+
+// TestClearReserveEmisConfig_KeepsReserveAlive is the applyDelete gate: an
+// EmisConfig eviction/TTL-lapse must clear only that side's emission fields,
+// never delete the reserve (unlike ResConfig/ResData, whose removal deletes
+// the whole reserve).
+func TestClearReserveEmisConfig_KeepsReserveAlive(t *testing.T) {
+	t.Parallel()
+
+	reserve := &reserveBuilder{state: contracts.ReserveState{
+		AssetID:                 "asset",
+		CFactorRaw:              "8000000",
+		SupplyEmisEPSRaw:        "1000000",
+		SupplyEmisExpirationRaw: "1800000000",
+		BorrowEmisEPSRaw:        "500000",
+		BorrowEmisExpirationRaw: "1800000000",
+	}}
+	clearReserveEmisConfig(reserve, 1)
+	if reserve.state.SupplyEmisEPSRaw != "" || reserve.state.SupplyEmisExpirationRaw != "" {
+		t.Fatalf("expected supply-side emission fields cleared, got eps=%q expiration=%q",
+			reserve.state.SupplyEmisEPSRaw, reserve.state.SupplyEmisExpirationRaw)
+	}
+	if reserve.state.BorrowEmisEPSRaw != "500000" {
+		t.Fatalf("expected borrow-side emission untouched, got %q", reserve.state.BorrowEmisEPSRaw)
+	}
+	if reserve.state.CFactorRaw != "8000000" {
+		t.Fatalf("expected core reserve config untouched, got CFactorRaw=%q", reserve.state.CFactorRaw)
 	}
 }
 
@@ -388,6 +497,11 @@ func u32Val(value uint32) xdr.ScVal {
 func boolVal(value bool) xdr.ScVal {
 	raw := value
 	return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &raw}
+}
+
+func u64Val(value uint64) xdr.ScVal {
+	raw := xdr.Uint64(value)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &raw}
 }
 
 func vecVal(items ...xdr.ScVal) xdr.ScVal {

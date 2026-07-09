@@ -78,6 +78,19 @@ type ReserveState struct {
 	// Normalized APR fractions, not percentages. Empty means unavailable.
 	SupplyEmissionsAPR string
 	BorrowEmissionsAPR string
+	// Per-side (supply/b-token, borrow/d-token) emission config + accrual data,
+	// decoded from the pool's EmisConfig/EmisData(res_token_id) storage, where
+	// res_token_id = ReserveIndex*2 + (1 for supply, 0 for borrow). An empty
+	// EPSRaw means no active emission config exists for that side — absence,
+	// never a fabricated "0". Expiration/LastTime are raw unix-second strings.
+	SupplyEmisEPSRaw        string
+	SupplyEmisExpirationRaw string
+	SupplyEmisIndexRaw      string
+	SupplyEmisLastTimeRaw   string
+	BorrowEmisEPSRaw        string
+	BorrowEmisExpirationRaw string
+	BorrowEmisIndexRaw      string
+	BorrowEmisLastTimeRaw   string
 }
 
 type UserReservePosition struct {

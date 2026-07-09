@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/daccred/lidapters/bindings"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // TestConfigRecords_EmitsLowFrequencyConfigOnly proves the adapter emits one
@@ -260,6 +261,85 @@ func dropResDataFor(t *testing.T, changes []bindings.ContractDataChange, assetID
 		out = append(out, c)
 	}
 	return out
+}
+
+// TestConfigRecords_EmisConfigOnReserveRecord proves EmisConfig (relay#26) rides
+// the SAME kindReserve config record as ResConfig — not a tombstone, and not a
+// separate record — so a restart reloads the reserve's active emission config
+// alongside its factors/curve, closing the same null-window class of bug the
+// oracle price / enabled+reactivity persistence already closed. EmisData
+// (index/last_time) is deliberately NOT asserted here — it is accrual data and
+// re-folds from bronze, same split as ResData.
+func TestConfigRecords_EmisConfigOnReserveRecord(t *testing.T) {
+	t.Parallel()
+
+	adapter := newTestAdapter(t)
+	poolID := validContractString(t, 21)
+	adapter.RegisterContracts(poolID)
+
+	changes := []bindings.ContractDataChange{
+		stateChange(t, poolID, symbolVal(t, "Config"), mapVal(t, map[string]xdr.ScVal{
+			"oracle":     contractAddressVal(t, 23),
+			"bstop_rate": u32Val(1_000_000),
+			"status":     u32Val(1),
+		})),
+		stateChange(t, poolID, symbolVal(t, "ResList"), vecVal(contractAddressVal(t, 22))),
+		stateChange(t, poolID, variantVal(t, "ResConfig", contractAddressVal(t, 22)), mapVal(t, map[string]xdr.ScVal{
+			"index":    u32Val(0),
+			"decimals": u32Val(7),
+			"c_factor": u32Val(8_000_000),
+			"l_factor": u32Val(9_000_000),
+		})),
+		// res_token_id = reserve_index*2 + side = 0*2 + 1 (supply side) = 1.
+		stateChange(t, poolID, variantVal(t, "EmisConfig", u32Val(1)), mapVal(t, map[string]xdr.ScVal{
+			"eps":        u64Val(2_000_000),
+			"expiration": u64Val(1_900_000_000),
+		})),
+	}
+
+	next, err := adapter.DecodeState(nil, changes, 500)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	records := adapter.ConfigRecords(next, ownedChanges(adapter, changes), 500)
+
+	var reserveRecords []bindings.ConfigRecord
+	for _, r := range records {
+		if r.Kind == kindReserve {
+			reserveRecords = append(reserveRecords, r)
+		}
+	}
+	if len(reserveRecords) != 1 {
+		t.Fatalf("expected 1 reserve config record, got %d", len(reserveRecords))
+	}
+	if reserveRecords[0].Removed {
+		t.Fatal("reserve config record must not be a tombstone from an EmisConfig change")
+	}
+	var body reserveConfigBody
+	if err := json.Unmarshal(reserveRecords[0].Payload, &body); err != nil {
+		t.Fatalf("unmarshal reserve payload: %v", err)
+	}
+	if body.SupplyEmisEPS != "2000000" {
+		t.Fatalf("expected supply_emis_eps=2000000, got %q", body.SupplyEmisEPS)
+	}
+	if body.SupplyEmisExpiration != "1900000000" {
+		t.Fatalf("expected supply_emis_expiration=1900000000, got %q", body.SupplyEmisExpiration)
+	}
+
+	seed, err := adapter.HydrateConfig(records)
+	if err != nil {
+		t.Fatalf("hydrate: %v", err)
+	}
+	if len(seed.Pools) != 1 || len(seed.Pools[0].Reserves) != 1 {
+		t.Fatalf("expected 1 pool with 1 reserve in hydrated seed, got pools=%d", len(seed.Pools))
+	}
+	hydrated := seed.Pools[0].Reserves[0]
+	if hydrated.SupplyEmisEPSRaw != "2000000" {
+		t.Fatalf("expected hydrated SupplyEmisEPSRaw=2000000, got %q", hydrated.SupplyEmisEPSRaw)
+	}
+	if hydrated.SupplyEmisExpirationRaw != "1900000000" {
+		t.Fatalf("expected hydrated SupplyEmisExpirationRaw=1900000000, got %q", hydrated.SupplyEmisExpirationRaw)
+	}
 }
 
 // --- helpers ---------------------------------------------------------------

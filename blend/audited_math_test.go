@@ -63,6 +63,116 @@ func TestV2RateModifierScaleAndUtilizationClamp(t *testing.T) {
 	}
 }
 
+// TestTransform_ReserveEmissions is the relay#26 fold gate at the transform
+// layer: a reserve with an active supply-side emission config produces exactly
+// one ReserveEmission row (never a fabricated borrow-side row for the absent
+// config), carrying the raw eps/expiration and an unavailable ("") APY since no
+// emitted-token price feed exists yet.
+func TestTransform_ReserveEmissions(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 1,
+		CloseTime: time.Unix(0, 0).UTC(),
+		State: &bindings.LedgerState{
+			Pools: []contracts.PoolState{{
+				ContractID:       "CPOOL",
+				WasmHash:         "wasm-v2",
+				BackstopTakeRate: "0",
+				Reserves: []contracts.ReserveState{{
+					AssetID:                 "CASSET",
+					AssetDecimals:           7,
+					BRateRaw:                "1000000000000",
+					DRateRaw:                "1000000000000",
+					BSupplyRaw:              "1000000000",
+					DSupplyRaw:              "2000000000",
+					CFactorRaw:              "8000000",
+					LFactorRaw:              "9000000",
+					UtilTargetRaw:           "5000000",
+					MaxUtilRaw:              "9500000",
+					RateModifierRaw:         "10000000",
+					SupplyCapRaw:            "100000000000",
+					OraclePriceRaw:          "100000000",
+					OracleDecimals:          8,
+					SupplyEmisEPSRaw:        "1000000",
+					SupplyEmisExpirationRaw: "1800000000",
+					// BorrowEmis* left empty: no active borrow-side config.
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.ReserveEmissions) != 1 {
+		t.Fatalf("expected exactly 1 reserve emission row (supply only), got %d", len(out.ReserveEmissions))
+	}
+	emission := out.ReserveEmissions[0]
+	if emission.Side != "supply" {
+		t.Fatalf("expected side=supply, got %q", emission.Side)
+	}
+	if emission.EPSRaw != "1000000" {
+		t.Fatalf("expected EPSRaw=1000000, got %q", emission.EPSRaw)
+	}
+	if emission.Expiration.Unix() != 1_800_000_000 {
+		t.Fatalf("expected expiration unix=1800000000, got %d", emission.Expiration.Unix())
+	}
+	if emission.APY != "" {
+		t.Fatalf("expected unavailable (empty) APY with no price feed, got %q", emission.APY)
+	}
+}
+
+// TestTransform_ReserveEmissions_AbsentWhenNoConfig guards the "never
+// fabricated" acceptance criterion: a reserve with no EmisConfig on either
+// side must produce zero ReserveEmission rows, not rows with a zero eps.
+func TestTransform_ReserveEmissions_AbsentWhenNoConfig(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(Config{V2WasmHashes: map[string]struct{}{"wasm-v2": {}}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 1,
+		CloseTime: time.Unix(0, 0).UTC(),
+		State: &bindings.LedgerState{
+			Pools: []contracts.PoolState{{
+				ContractID:       "CPOOL",
+				WasmHash:         "wasm-v2",
+				BackstopTakeRate: "0",
+				Reserves: []contracts.ReserveState{{
+					AssetID:         "CASSET",
+					AssetDecimals:   7,
+					BRateRaw:        "1000000000000",
+					DRateRaw:        "1000000000000",
+					BSupplyRaw:      "1000000000",
+					DSupplyRaw:      "2000000000",
+					CFactorRaw:      "8000000",
+					LFactorRaw:      "9000000",
+					UtilTargetRaw:   "5000000",
+					MaxUtilRaw:      "9500000",
+					RateModifierRaw: "10000000",
+					SupplyCapRaw:    "100000000000",
+					OraclePriceRaw:  "100000000",
+					OracleDecimals:  8,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.ReserveEmissions) != 0 {
+		t.Fatalf("expected 0 reserve emission rows when no EmisConfig exists, got %d", len(out.ReserveEmissions))
+	}
+}
+
 func TestPoolIsolatedWorstSummarySemantics(t *testing.T) {
 	t.Parallel()
 

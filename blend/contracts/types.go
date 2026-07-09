@@ -61,6 +61,11 @@ type ReserveState struct {
 	SupplyCapRaw    string
 	OraclePriceRaw  string
 	OracleDecimals  int32
+	// Enabled is ResConfig's per-reserve "can act right now" flag — distinct from
+	// the pool-level status. ReactivityRaw is the IR-curve reactivity constant
+	// (u32, 7-dp), governing how fast ir_mod moves.
+	Enabled       bool
+	ReactivityRaw string
 	// Normalized APR fractions, not percentages. Empty means unavailable.
 	SupplyEmissionsAPR string
 	BorrowEmissionsAPR string

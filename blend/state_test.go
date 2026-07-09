@@ -32,10 +32,12 @@ func representativeChanges(t *testing.T) []bindings.ContractDataChange {
 		stateChange(t, poolID, symbolVal(t, "Backstop"), contractAddressVal(t, 4)),
 		stateChange(t, poolID, symbolVal(t, "ResList"), vecVal(contractAddressVal(t, 2))),
 		stateChange(t, poolID, variantVal(t, "ResConfig", contractAddressVal(t, 2)), mapVal(t, map[string]xdr.ScVal{
-			"index":    u32Val(1),
-			"decimals": u32Val(7),
-			"c_factor": u32Val(8_000_000),
-			"l_factor": u32Val(9_000_000),
+			"index":      u32Val(1),
+			"decimals":   u32Val(7),
+			"c_factor":   u32Val(8_000_000),
+			"l_factor":   u32Val(9_000_000),
+			"reactivity": u32Val(20_000),
+			"enabled":    boolVal(true),
 		})),
 		stateChange(t, poolID, variantVal(t, "ResData", contractAddressVal(t, 2)), mapVal(t, map[string]xdr.ScVal{
 			"d_rate":   i128Val(1_000_000),
@@ -95,6 +97,50 @@ func TestDecodeState_RunTwiceByteIdentical(t *testing.T) {
 	}
 	if !bytes.Equal(b1, b2) {
 		t.Fatalf("run-twice output not byte-identical:\nfirst=%s\nsecond=%s", b1, b2)
+	}
+}
+
+// TestApplyReserveConfig_DecodesEnabledAndReactivity is the decode-gap-audit
+// (lidapters#9 / relay#27) regression: ReserveConfig's `enabled` bool and
+// `reactivity` u32 are in the same ScVal map as c_factor/l_factor, so decoding
+// them is a one-line addition to applyReserveConfig, not a new chain read.
+func TestApplyReserveConfig_DecodesEnabledAndReactivity(t *testing.T) {
+	t.Parallel()
+
+	adapter := newTestAdapter(t)
+	state, err := adapter.DecodeState(nil, representativeChanges(t), 123)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(state.Pools) != 1 || len(state.Pools[0].Reserves) != 1 {
+		t.Fatalf("expected 1 pool with 1 reserve, got pools=%d", len(state.Pools))
+	}
+	reserve := state.Pools[0].Reserves[0]
+	if !reserve.Enabled {
+		t.Fatalf("expected reserve.Enabled=true, got false")
+	}
+	if reserve.ReactivityRaw != "20000" {
+		t.Fatalf("expected reserve.ReactivityRaw=20000, got %q", reserve.ReactivityRaw)
+	}
+}
+
+// TestApplyReserveConfig_MissingEnabledDefaultsFalse guards the fieldBool
+// helper against the zero-value ScVal panic: ScValTypeScvBool is the zero
+// value of the xdr.ScValType enum, so a ResConfig map with no `enabled` key
+// must decode to false/absent rather than dereference a nil *bool.
+func TestApplyReserveConfig_MissingEnabledDefaultsFalse(t *testing.T) {
+	t.Parallel()
+
+	reserve := &reserveBuilder{}
+	applyReserveConfig(reserve, mapVal(t, map[string]xdr.ScVal{
+		"index":    u32Val(1),
+		"c_factor": u32Val(8_000_000),
+	}))
+	if reserve.state.Enabled {
+		t.Fatalf("expected Enabled=false when key absent, got true")
+	}
+	if reserve.state.ReactivityRaw != "" {
+		t.Fatalf("expected empty ReactivityRaw when key absent, got %q", reserve.state.ReactivityRaw)
 	}
 }
 
@@ -273,6 +319,11 @@ func stateChange(t *testing.T, contractID string, key, value xdr.ScVal, opts ...
 func u32Val(value uint32) xdr.ScVal {
 	raw := xdr.Uint32(value)
 	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &raw}
+}
+
+func boolVal(value bool) xdr.ScVal {
+	raw := value
+	return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &raw}
 }
 
 func vecVal(items ...xdr.ScVal) xdr.ScVal {

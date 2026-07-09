@@ -778,6 +778,12 @@ func applyReserveConfig(reserve *reserveBuilder, value xdr.ScVal) {
 	if supplyCap, ok := fieldIntString(fields, "supply_cap"); ok {
 		reserve.state.SupplyCapRaw = supplyCap
 	}
+	if reactivity, ok := fieldIntString(fields, "reactivity"); ok {
+		reserve.state.ReactivityRaw = reactivity
+	}
+	if enabled, ok := fieldBool(fields, "enabled"); ok {
+		reserve.state.Enabled = enabled
+	}
 }
 
 func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
@@ -1257,4 +1263,15 @@ func fieldInt32(fields map[string]xdr.ScVal, name string) (int32, bool) {
 		return 0, false
 	}
 	return scInt32(fields[name])
+}
+
+func fieldBool(fields map[string]xdr.ScVal, name string) (bool, bool) {
+	if fields == nil {
+		return false, false
+	}
+	v, present := fields[name]
+	if !present || v.Type != xdr.ScValTypeScvBool || v.B == nil {
+		return false, false
+	}
+	return *v.B, true
 }

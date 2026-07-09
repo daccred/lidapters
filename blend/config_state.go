@@ -142,10 +142,13 @@ func (a *Adapter) ConfigSchema() []bindings.ConfigTableSchema {
 				factor("r_two", "r_two"),
 				factor("r_three", "r_three"),
 				{Name: "supply_cap", SQLType: "numeric", Expr: "NULLIF(payload->>'supply_cap','')::numeric"},
+				factor("reactivity", "reactivity"),
+				{Name: "enabled", SQLType: "boolean", Expr: "NULLIF(payload->>'enabled','')::boolean"},
 			},
 			Indexes: []bindings.ConfigIndex{
 				{Name: "idx_blend_reserve_config_pool", Columns: []string{"pool_id"}},
 				{Name: "idx_blend_reserve_config_asset", Columns: []string{"asset_id"}},
+				{Name: "idx_blend_reserve_config_enabled", Columns: []string{"enabled"}},
 			},
 		},
 	}
@@ -191,6 +194,8 @@ type reserveConfigBody struct {
 	RTwo       string `json:"r_two"`
 	RThree     string `json:"r_three"`
 	SupplyCap  string `json:"supply_cap"`
+	Reactivity string `json:"reactivity"`
+	Enabled    bool   `json:"enabled"`
 }
 
 // --- record emission (chain-signal, pure) -----------------------------------
@@ -415,6 +420,8 @@ func marshalReserveBody(poolID string, r contracts.ReserveState) []byte {
 		RTwo:       r.RTwoRaw,
 		RThree:     r.RThreeRaw,
 		SupplyCap:  r.SupplyCapRaw,
+		Reactivity: r.ReactivityRaw,
+		Enabled:    r.Enabled,
 	})
 }
 
@@ -497,6 +504,8 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 				RTwoRaw:       body.RTwo,
 				RThreeRaw:     body.RThree,
 				SupplyCapRaw:  body.SupplyCap,
+				ReactivityRaw: body.Reactivity,
+				Enabled:       body.Enabled,
 			})
 		}
 	}

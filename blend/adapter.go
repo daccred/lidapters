@@ -24,6 +24,14 @@ type Adapter struct {
 	// DecodeState purity guarantee. Seeded empty; the relay projector feeds
 	// discovered pools via RegisterContracts.
 	contracts map[string]struct{}
+	// assets is the registered token-contract set: reserve assets the relay edge
+	// feeds via RegisterAssetContracts once a pool's reserve list reveals them.
+	// It is checked ahead of the generic pool-instance branch in the reducer so a
+	// registered asset's instance entry is always decoded on the SAC/SEP-41 path
+	// and never mistaken for a pool — critical for a wasm-backed SEP-41 token,
+	// which would otherwise pass the pool branch's wasm-hash sniff. Same
+	// config-like status as contracts; does not affect DecodeState purity.
+	assets map[string]struct{}
 }
 
 func New(cfg Config) (*Adapter, error) {

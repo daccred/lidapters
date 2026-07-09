@@ -131,6 +131,19 @@ type OracleIndexPrice struct {
 	PriceRaw string
 }
 
+// AssetMetadata is one registered token contract's decoded human-readable
+// identity — a Stellar Asset Contract's AssetInfo instance entry or a SEP-41
+// token's METADATA instance entry, decoded to {symbol, name, decimals}. It
+// rides in LedgerState so the decoder stays a stateless pure reducer, the same
+// carry requirement as OracleState: the instance is written once at deploy and
+// not re-emitted on later ledgers.
+type AssetMetadata struct {
+	ContractID string
+	Symbol     string
+	Name       string
+	Decimals   int32
+}
+
 // PendingUserPosition retains a Blend user's raw, not-yet-resolved positions
 // ScVal so the decoder can stay a stateless pure reducer: user positions are
 // keyed by reserve index in the raw blob and only resolve to assets against a

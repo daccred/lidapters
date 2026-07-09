@@ -128,6 +128,16 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		return nil
 	}
 
+	// assetMeta looks up each registered token contract's decoded human-readable
+	// identity by contract ID, built once per ledger from the carried state. A
+	// miss (unregistered or not-yet-decoded asset) leaves Reserve.Metadata's
+	// asset_symbol/asset_name and Activity.AssetSymbol at their zero value —
+	// absent, never guessed.
+	assetMeta := map[string]contracts.AssetMetadata{}
+	for _, meta := range input.State.Assets {
+		assetMeta[meta.ContractID] = meta
+	}
+
 	pools := map[string]normalizedPool{}
 	reserves := map[string]normalizedReserve{}
 	for _, pool := range input.State.Pools {
@@ -210,6 +220,8 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 				Timestamp:      input.CloseTime,
 				Metadata: map[string]string{
 					"scalar_version":           nPool.scalarVersion,
+					"asset_symbol":             assetMeta[reserve.AssetID].Symbol,
+					"asset_name":               assetMeta[reserve.AssetID].Name,
 					"asset_decimals":           parseDecimalsInt(nReserve.assetDecimals),
 					"oracle_price_usd":         numString(nReserve.usdPrice),
 					"oracle_price":             numString(nReserve.usdPrice),
@@ -242,6 +254,9 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 	// fabricated zero.
 	for i := range output.Activities {
 		activity := &output.Activities[i]
+		if meta, ok := assetMeta[activity.AssetID]; ok {
+			activity.AssetSymbol = meta.Symbol
+		}
 		if activity.AssetID == "" || activity.AmountRaw == "" {
 			continue
 		}

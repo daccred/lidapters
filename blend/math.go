@@ -37,6 +37,7 @@ type normalizedReserve struct {
 	rTwoRaw                  decimal.Decimal
 	rThreeRaw                decimal.Decimal
 	rateModifierRaw          decimal.Decimal
+	reactivityRaw            decimal.Decimal
 	usdPrice                 decimal.Decimal
 	priceAvailable           bool
 	totalSuppliedRaw         decimal.Decimal
@@ -58,6 +59,7 @@ type normalizedReserve struct {
 	rOneNormalized           decimal.Decimal
 	rTwoNormalized           decimal.Decimal
 	rThreeNormalized         decimal.Decimal
+	reactivityNormalized     decimal.Decimal
 	borrowAPRNormalized      decimal.Decimal
 	supplyAPRNormalized      decimal.Decimal
 	borrowAPRNormalizedValid bool
@@ -261,6 +263,8 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 					"r_two":                    numString(nReserve.rTwoNormalized),
 					"r_three":                  numString(nReserve.rThreeNormalized),
 					"rate_modifier":            numString(nReserve.rateModifierNormalized),
+					"reactivity":               numString(nReserve.reactivityNormalized),
+					"enabled":                  boolString(reserve.Enabled),
 					"apr_partial":              boolString(nReserve.aprPartial),
 					"pool_balance_raw":         nReserve.raw.PoolBalanceRaw,
 					"remaining_borrowable_raw": numString(nReserve.remainingBorrowableRaw),
@@ -934,6 +938,9 @@ func normalizeReserve(poolContract string, pool normalizedPool, reserve contract
 	if out.rateModifierRaw, err = mustParseDecimal(reserve.RateModifierRaw); err != nil {
 		return out, err
 	}
+	if out.reactivityRaw, err = mustParseDecimal(reserve.ReactivityRaw); err != nil {
+		return out, err
+	}
 
 	out.cFactorNormalized = out.cFactorRaw.Div(factorScaleDecimal)
 	out.lFactorNormalized = out.lFactorRaw.Div(factorScaleDecimal)
@@ -943,6 +950,7 @@ func normalizeReserve(poolContract string, pool normalizedPool, reserve contract
 	out.rOneNormalized = out.rOneRaw.Div(factorScaleDecimal)
 	out.rTwoNormalized = out.rTwoRaw.Div(factorScaleDecimal)
 	out.rThreeNormalized = out.rThreeRaw.Div(factorScaleDecimal)
+	out.reactivityNormalized = out.reactivityRaw.Div(factorScaleDecimal)
 	out.rateModifierNormalized, err = normalizedRateModifier(reserve.RateModifierRaw, pool.rateModifierScalar)
 	if err != nil {
 		return out, err

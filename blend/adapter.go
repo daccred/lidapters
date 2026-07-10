@@ -17,6 +17,11 @@ var _ bindings.ProtocolAdapter = (*Adapter)(nil)
 // config_state.go.
 var _ bindings.ConfigStateful = (*Adapter)(nil)
 
+// Adapter decodes time-dependent oracle state (the aggregators' MaxAge
+// staleness window) when the host supplies the ledger close time. See
+// state_reflector.go.
+var _ bindings.CloseTimeStateDecoder = (*Adapter)(nil)
+
 type Adapter struct {
 	cfg Config
 	// contracts is the owned contract-ID set OwnsContract checks. It is
@@ -32,6 +37,13 @@ type Adapter struct {
 	// which would otherwise pass the pool branch's wasm-hash sniff. Same
 	// config-like status as contracts; does not affect DecodeState purity.
 	assets map[string]struct{}
+	// feeds is the registered Reflector price-feed set the relay edge fills via
+	// RegisterPriceFeeds. A feed's contract_data (per-round price entries plus
+	// the instance's asset list) is routed onto the Reflector decode path ahead
+	// of every other branch — a feed instance carries a wasm executable and
+	// would otherwise be misdecoded as a phantom pool. Same config-like status
+	// as contracts; does not affect DecodeState purity.
+	feeds map[string]struct{}
 }
 
 func New(cfg Config) (*Adapter, error) {

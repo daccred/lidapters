@@ -51,6 +51,17 @@ type LedgerState struct {
 	// and price-only ledgers would map nothing). It is the oracle analog of
 	// PendingUserPositions. Carried state only — never emitted to gold.
 	Oracles []contracts.OracleState
+	// PriceFeeds carries each registered Reflector price feed's decoded asset
+	// list and recent rounds, and OracleAggregators carries each Blend
+	// oracle-aggregator's instance configuration. Mainnet pools name aggregator
+	// VIEW contracts as their oracle — contracts that never write prices; the
+	// real writes are the feeds' rounds, and the aggregator config is what maps
+	// a pool reserve onto them. Both are carried state only — never emitted to
+	// gold; each ledger the fold re-synthesizes the aggregator's prices from
+	// them into the same oracle representation the resolveOraclePrices path
+	// already consumes.
+	PriceFeeds        []contracts.PriceFeedState
+	OracleAggregators []contracts.OracleAggregatorState
 	// Assets carries each registered token contract's decoded human-readable
 	// identity (SAC AssetInfo or SEP-41 METADATA). Like the oracle instance, a
 	// token's identity entry is written once at deploy and never re-emitted, so
@@ -114,6 +125,20 @@ type ProtocolAdapter interface {
 
 	// Transform folds events + typed state into gold. Pure; unchanged by the fold.
 	Transform(input TransformInput) (*TransformOutput, error)
+}
+
+// CloseTimeStateDecoder is the close-time-aware variant of DecodeState. The
+// ledger close time comes from the same close-meta the changes were extracted
+// from — it is fold INPUT, not a clock read, so purity holds: (prior, changes,
+// ledgerSeq, closeTime) -> next is still a deterministic function of bronze.
+// An adapter implements it when some decode semantics depend on ledger time —
+// the Blend oracle-aggregators' MaxAge staleness window is the motivating case
+// (a price older than MaxAge at the folding ledger's close must resolve to
+// nothing, exactly as the aggregator's own lastprice would). Hosts that have
+// the close time (the relay projector decodes it from the raw meta anyway)
+// prefer this over DecodeState when the adapter provides it.
+type CloseTimeStateDecoder interface {
+	DecodeStateAt(prior *LedgerState, changes []ContractDataChange, ledgerSeq int64, closeTime time.Time) (*LedgerState, error)
 }
 
 type TransformInput struct {

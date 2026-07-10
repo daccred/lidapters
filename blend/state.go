@@ -29,7 +29,18 @@ import (
 // changes, and returns the freshly built LedgerState. No DB / network / clock /
 // random / map-order; deterministic and run-twice byte-identical.
 func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64) (*bindings.LedgerState, error) {
-	next, _ := a.decodeBlendState(prior, changes, ledgerSeq)
+	return a.DecodeStateAt(prior, changes, ledgerSeq, time.Time{})
+}
+
+// DecodeStateAt is DecodeState with the folding ledger's close time threaded
+// in. The close time comes from the same close-meta as the changes, so it is
+// fold input, not a clock — purity holds. It gates the oracle-aggregators'
+// MaxAge staleness window (state_reflector.go); a zero closeTime (the plain
+// DecodeState path) falls back to each feed's newest round timestamp as the
+// reference "now", which prices the freshest round but cannot observe a feed
+// that stopped publishing.
+func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
+	next, _ := a.decodeBlendState(prior, changes, ledgerSeq, closeTime)
 	return &next, nil
 }
 
@@ -42,6 +53,9 @@ func (a *Adapter) OwnsContract(contractID string) bool {
 		return false
 	}
 	if _, ok := a.contracts[contractID]; ok {
+		return true
+	}
+	if _, ok := a.feeds[contractID]; ok {
 		return true
 	}
 	_, ok := a.assets[contractID]
@@ -81,6 +95,23 @@ func (a *Adapter) RegisterAssetContracts(ids ...string) {
 	}
 }
 
+// RegisterPriceFeeds adds Reflector price-feed contract IDs (the feeds backing
+// the pools' oracle-aggregators) to the registered feed set. Idempotent;
+// ignores blank IDs. Called by the relay's projector edge from static config
+// (it is NOT called from the pure DecodeState path): feeds must be owned from
+// the first folded ledger, or the projector filters their round writes out
+// before decode and no aggregator can ever resolve a price.
+func (a *Adapter) RegisterPriceFeeds(ids ...string) {
+	if a.feeds == nil {
+		a.feeds = map[string]struct{}{}
+	}
+	for _, id := range ids {
+		if id != "" {
+			a.feeds[id] = struct{}{}
+		}
+	}
+}
+
 type typedStateDelta struct {
 	LedgerSeq  int64
 	EntityType string
@@ -95,6 +126,8 @@ type blendStateBuilder struct {
 	backstopPools map[string]backstopPoolBalance
 	backstopUsers map[string]backstopUserBalance
 	oracles       map[string]*oracleBuilder
+	feeds         map[string]*feedBuilder
+	aggregators   map[string]*aggregatorBuilder
 	assets        map[string]contracts.AssetMetadata
 	// owned is the adapter's owned-contract set, threaded in so the reducer can
 	// tell an oracle's contract_data apart from a pool's. It is read-only config,
@@ -105,7 +138,12 @@ type blendStateBuilder struct {
 	// asset's contract_data onto the SAC/SEP-41 decode path ahead of the generic
 	// pool-instance branch.
 	ownedAssets map[string]struct{}
-	deltas      []typedStateDelta
+	// ownedFeeds is the adapter's registered Reflector price-feed set, threaded
+	// in the same read-only-config way, so a feed's contract_data is always
+	// routed onto the Reflector decode path (state_reflector.go) and never
+	// mistaken for a pool or a mock oracle.
+	ownedFeeds map[string]struct{}
+	deltas     []typedStateDelta
 }
 
 // oracleBuilder accumulates the parts of a Blend price oracle that a fold needs
@@ -118,6 +156,13 @@ type oracleBuilder struct {
 	decimals     int32
 	assetToIndex map[string]int64
 	priceByIndex map[int64]string
+	// synthesized marks an oracle whose map and prices were derived this ledger
+	// from an oracle-aggregator's config plus registered feed rounds
+	// (resolveAggregatorPrices) rather than decoded from the oracle's own
+	// writes. Synthesized oracles are recomputed every ledger from the carried
+	// aggregator + feed state, so they are excluded from the LedgerState.Oracles
+	// carry — carrying them too would create a second source of truth.
+	synthesized bool
 }
 
 type poolBuilder struct {
@@ -159,6 +204,8 @@ func newBlendStateBuilder() *blendStateBuilder {
 		backstopPools: map[string]backstopPoolBalance{},
 		backstopUsers: map[string]backstopUserBalance{},
 		oracles:       map[string]*oracleBuilder{},
+		feeds:         map[string]*feedBuilder{},
+		aggregators:   map[string]*aggregatorBuilder{},
 		assets:        map[string]contracts.AssetMetadata{},
 	}
 }
@@ -167,10 +214,11 @@ func newBlendStateBuilder() *blendStateBuilder {
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
 // built state plus the silver-debug deltas.
-func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64) (bindings.LedgerState, []typedStateDelta) {
+func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	b.ownedAssets = a.assets
+	b.ownedFeeds = a.feeds
 	if prior != nil {
 		b.loadPrior(prior)
 	}
@@ -200,7 +248,7 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 		return string(di.StateJSON) < string(dj.StateJSON)
 	})
 
-	return b.build(), b.deltas
+	return b.build(closeTime), b.deltas
 }
 
 // loadPrior reconstructs the mirror from the prior LedgerState so the reducer
@@ -267,11 +315,26 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 		// it was decoded on.
 		b.assets[asset.ContractID] = asset
 	}
+	// A feed round only appears in the ledger it was published, and an
+	// aggregator's instance config is assembled once and rarely touched — both
+	// must be restored for any later ledger to synthesize prices (the Reflector
+	// analog of the Oracles carry above).
+	for _, feed := range prior.PriceFeeds {
+		b.feeds[feed.ContractID] = feedBuilderFromState(feed)
+	}
+	for _, agg := range prior.OracleAggregators {
+		b.aggregators[agg.ContractID] = aggregatorBuilderFromState(agg)
+	}
 }
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
 // the output is byte-identical when the same input is folded twice.
-func (b *blendStateBuilder) build() bindings.LedgerState {
+func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
+	// Synthesize each oracle-aggregator's per-asset prices from the carried
+	// aggregator config + registered feed rounds FIRST, so the existing
+	// resolveOraclePrices pass below sees them exactly as if the oracle had
+	// written per-index prices itself (the testnet-mock representation).
+	b.resolveAggregatorPrices(closeTime)
 	// Thread decoded oracle prices onto their reserves before the slices are
 	// finalized and sorted, so the price rides on the already-deterministic
 	// reserve ordering (finalizePoolReserves + sortLedgerState) and the run-twice
@@ -325,6 +388,8 @@ func (b *blendStateBuilder) build() bindings.LedgerState {
 		Backstops:            backstops,
 		PendingUserPositions: pending,
 		Oracles:              b.buildOracles(),
+		PriceFeeds:           b.buildPriceFeeds(),
+		OracleAggregators:    b.buildOracleAggregators(),
 		Assets:               b.buildAssets(),
 	}
 }
@@ -356,6 +421,11 @@ func (b *blendStateBuilder) buildOracles() []contracts.OracleState {
 	}
 	oracles := make([]contracts.OracleState, 0, len(b.oracles))
 	for contractID, oracle := range b.oracles {
+		if oracle.synthesized {
+			// Derived every ledger from the carried aggregator + feed state —
+			// carrying the derived copy too would be a second source of truth.
+			continue
+		}
 		assets := make([]contracts.OracleAssetIndex, 0, len(oracle.assetToIndex))
 		for assetID, index := range oracle.assetToIndex {
 			assets = append(assets, contracts.OracleAssetIndex{AssetID: assetID, Index: index})
@@ -377,6 +447,11 @@ func (b *blendStateBuilder) buildOracles() []contracts.OracleState {
 			Assets:     assets,
 			Prices:     prices,
 		})
+	}
+	if len(oracles) == 0 {
+		// All builders were synthesized — keep the no-oracles shape identical to
+		// the no-builders shape so run-twice output stays byte-identical.
+		return nil
 	}
 	sort.Slice(oracles, func(i, j int) bool { return oracles[i].ContractID < oracles[j].ContractID })
 	return oracles
@@ -408,13 +483,31 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		return
 	}
 
+	// A registered Reflector price feed's contract_data is always decoded on the
+	// Reflector path — per-round price entries (protocol 1: u128(ts<<64|index)
+	// keys; protocol 2: u64(ts) batch keys) and the feed instance (asset list,
+	// decimals, last_timestamp, round cache). Routed by the registered set, ahead
+	// of everything: a feed instance carries a wasm executable and would
+	// otherwise be misdecoded as a phantom pool by the wasm-hash sniff below.
+	if _, isFeed := b.ownedFeeds[change.ContractID]; isFeed {
+		b.applyFeedChange(change.ContractID, key, value)
+		return
+	}
+
 	// A registered price oracle stores two kinds of entries we care about: its
 	// contract instance (whose storage carries the ordered asset list and the
 	// shared price decimals) and one temporary entry per asset holding the raw
 	// price, keyed by the asset's index. Decode those here, ahead of the generic
 	// contract-instance handling, so an oracle is never mistaken for a pool.
+	// A mainnet oracle-aggregator's instance (Base/Decimals/MaxAge + the
+	// asset->feed map) is recognized the same way — its storage shape is
+	// distinct from both the mock oracle's and a pool's, but like them it
+	// carries a wasm executable and must not fall through to the pool sniff.
 	if _, owned := b.owned[change.ContractID]; owned {
 		if b.applyOracleInstance(change.ContractID, value) {
+			return
+		}
+		if b.applyAggregatorInstance(change.ContractID, value) {
 			return
 		}
 		if isOraclePriceKey(key) {
@@ -554,6 +647,15 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 }
 
 func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
+	if _, isFeed := b.ownedFeeds[change.ContractID]; isFeed {
+		// Feed rounds are temporary storage with a ~day-scale TTL; by the time a
+		// round's delete arrives it is far outside any aggregator's staleness
+		// window and long since trimmed from the bounded carry, so dropping it is
+		// normally a no-op. Absorbed here regardless so a feed's deletes never
+		// fall through to the pool delete logic.
+		b.applyFeedDelete(change.ContractID, key)
+		return
+	}
 	if _, isAsset := b.ownedAssets[change.ContractID]; isAsset {
 		// Any change on a registered asset contract is fully absorbed here — it never
 		// falls through to the pool delete logic below. Only the instance entry
@@ -575,6 +677,13 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 				delete(oracle.priceByIndex, index)
 			}
 		}
+		return
+	}
+	if key.Type == xdr.ScValTypeScvLedgerKeyContractInstance {
+		// An oracle-aggregator's instance going not-live takes its configuration
+		// with it — prices stop resolving rather than freezing on the last config.
+		// For every other contract an instance delete stays the no-op it was.
+		delete(b.aggregators, change.ContractID)
 		return
 	}
 	if sym, ok := scSymbol(key); ok {

@@ -153,6 +153,90 @@ type OracleIndexPrice struct {
 	PriceRaw string
 }
 
+// PriceFeedState is one registered Reflector price feed's carried decode state:
+// the ordered asset list from the feed's instance storage, the feed's shared
+// price decimals, the newest round timestamp, and the most recent rounds' raw
+// prices. Reflector writes one round per resolution period (temporary entries;
+// protocol 1 keyed u128(ts_ms<<64|asset_index) with a bare i128 value, protocol
+// 2 keyed u64(ts_ms) with a sparse {mask, prices} batch), so the rounds an
+// aggregator's staleness window can still reach must ride in LedgerState for a
+// price-less ledger to resolve anything — the feed analog of OracleState.
+type PriceFeedState struct {
+	ContractID  string
+	Decimals    int32
+	LastRoundMs int64
+	Assets      []FeedAssetIndex
+	Rounds      []FeedRound
+}
+
+// FeedAssetIndex binds one feed asset to its index in the feed's ordered asset
+// list. AssetKey is the canonical form of the SEP-40 Asset enum:
+// "stellar:<contract-id>" for Asset::Stellar, "other:<symbol>" for Asset::Other.
+type FeedAssetIndex struct {
+	AssetKey string
+	Index    int64
+}
+
+// FeedRound is one Reflector publication round: the normalized round timestamp
+// (milliseconds, on the feed's resolution grid) and the raw feed-decimal price
+// per asset index present in that round.
+type FeedRound struct {
+	TimestampMs int64
+	Prices      []FeedRoundPrice
+}
+
+// FeedRoundPrice is one asset's raw price within a round, keyed by the asset's
+// index in the feed's asset list.
+type FeedRoundPrice struct {
+	Index    int64
+	PriceRaw string
+}
+
+// OracleAggregatorState is one Blend oracle-aggregator's carried configuration,
+// decoded from its instance storage (Admin/Base/BaseAssets/Assets/Oracles/
+// Decimals/MaxAge — blend-capital/oracle-aggregator storage.rs). The aggregator
+// itself never writes prices; at fold time its per-asset prices are synthesized
+// from the registered feeds' rounds using exactly this configuration. The
+// config is assembled across several admin transactions after deploy, then
+// rarely touched, so it must ride in LedgerState — the same carry requirement
+// as OracleState.
+type OracleAggregatorState struct {
+	ContractID string
+	Decimals   int32
+	MaxAgeS    int64
+	// BaseKey is the canonical asset key of the aggregator's Base — the unit its
+	// answers are quoted in ("other:USD" fiat for Fixed, "stellar:<USDC id>" for
+	// YieldBlox). Carried, not converted: downstream valuations are denominated
+	// exactly as the pool's own solvency math sees them.
+	BaseKey string
+	// BaseAssets are canonical asset keys hardcoded to price 1.0 at the
+	// aggregator's decimals, with no feed lookup at all.
+	BaseAssets []string
+	Feeds      []AggregatorFeedRef
+	Assets     []AggregatorAssetConfig
+}
+
+// AggregatorFeedRef is one entry of the aggregator's Oracles vec: the Reflector
+// feed answering for the assets whose OracleIndex points here, plus the feed
+// decimals and resolution the aggregator's own price math uses.
+type AggregatorFeedRef struct {
+	Index       int64
+	ContractID  string
+	Decimals    int32
+	ResolutionS int64
+}
+
+// AggregatorAssetConfig maps one pool-side asset (a Stellar token contract) to
+// its feed-side identity: the canonical feed asset key, the feed to ask
+// (OracleIndex into Feeds), and the max_dev deviation guard (percent, 0/100 =
+// disabled) the aggregator applies before serving a price.
+type AggregatorAssetConfig struct {
+	AssetID      string
+	FeedAssetKey string
+	OracleIndex  int64
+	MaxDev       int64
+}
+
 // AssetMetadata is one registered token contract's decoded human-readable
 // identity — a Stellar Asset Contract's AssetInfo instance entry or a SEP-41
 // token's METADATA instance entry, decoded to {symbol, name, decimals}. It

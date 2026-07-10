@@ -166,6 +166,58 @@ func (a *Adapter) ConfigSchema() []bindings.ConfigTableSchema {
 type oracleConfigBody struct {
 	Decimals int32             `json:"decimals"`
 	Assets   []oracleAssetBody `json:"assets"`
+	// Exactly one of Aggregator / Feed is set when the blend.oracle record
+	// describes a mainnet oracle-aggregator or a Reflector price feed rather
+	// than a price-writing oracle. The host stores the payload opaquely, so the
+	// extension needs no new kind or table; hydration routes on which section is
+	// present. For these records Assets carries the entity's own asset map
+	// (feed asset list / aggregator asset->synthetic-index map), keeping the
+	// blend_oracle_asset analytics view meaningful for them too.
+	Aggregator *aggregatorConfigBody `json:"aggregator,omitempty"`
+	Feed       *feedConfigBody       `json:"feed,omitempty"`
+}
+
+// aggregatorConfigBody persists an oracle-aggregator's carried configuration —
+// without it, a restarted fold would re-price only when the aggregator's
+// instance is next rewritten, which on mainnet is effectively never.
+type aggregatorConfigBody struct {
+	MaxAgeS    int64                 `json:"max_age_s"`
+	BaseKey    string                `json:"base_key"`
+	BaseAssets []string              `json:"base_assets,omitempty"`
+	Feeds      []aggregatorFeedBody  `json:"feeds,omitempty"`
+	AssetsCfg  []aggregatorAssetBody `json:"assets_cfg,omitempty"`
+}
+
+type aggregatorFeedBody struct {
+	Index       int64  `json:"index"`
+	ContractID  string `json:"contract_id"`
+	Decimals    int32  `json:"decimals"`
+	ResolutionS int64  `json:"resolution_s"`
+}
+
+type aggregatorAssetBody struct {
+	AssetID      string `json:"asset_id"`
+	FeedAssetKey string `json:"feed_asset_key"`
+	OracleIndex  int64  `json:"oracle_index"`
+	MaxDev       int64  `json:"max_dev"`
+}
+
+// feedConfigBody persists a Reflector feed's carried state including its
+// bounded recent rounds, so a restarted fold prices immediately instead of
+// waiting out the feed's next publication.
+type feedConfigBody struct {
+	LastRoundMs int64           `json:"last_round_ms"`
+	Rounds      []feedRoundBody `json:"rounds,omitempty"`
+}
+
+type feedRoundBody struct {
+	TimestampMs int64                `json:"timestamp_ms"`
+	Prices      []feedRoundPriceBody `json:"prices"`
+}
+
+type feedRoundPriceBody struct {
+	Index    int64  `json:"index"`
+	PriceRaw string `json:"price_raw"`
 }
 
 type oracleAssetBody struct {
@@ -231,10 +283,20 @@ func (a *Adapter) ConfigRecords(next *bindings.LedgerState, changes []bindings.C
 	for _, p := range next.Pools {
 		poolByID[p.ContractID] = p
 	}
+	aggregatorByID := make(map[string]contracts.OracleAggregatorState, len(next.OracleAggregators))
+	for _, a := range next.OracleAggregators {
+		aggregatorByID[a.ContractID] = a
+	}
+	feedByID := make(map[string]contracts.PriceFeedState, len(next.PriceFeeds))
+	for _, f := range next.PriceFeeds {
+		feedByID[f.ContractID] = f
+	}
 
 	// dirty sets: value is true when the config key was removed this ledger.
 	dirtyOracle := map[string]bool{}
 	dirtyPool := map[string]bool{}
+	dirtyAggregator := map[string]bool{}
+	dirtyFeed := map[string]bool{}
 	type reserveRef struct{ pool, asset string }
 	dirtyReserve := map[reserveRef]bool{}
 	type priceRef struct {
@@ -254,7 +316,15 @@ func (a *Adapter) ConfigRecords(next *bindings.LedgerState, changes []bindings.C
 			// the folded next state to tell an oracle instance (asset map) from a
 			// pool instance (wasm hash); a removed instance that is gone from next is
 			// left to the Config/ResList removal path (real decommission signal).
-			if _, isOracle := oracleByID[ch.ContractID]; isOracle {
+			// A Reflector feed's instance is rewritten every round and an
+			// oracle-aggregator's on every admin config call — both are config for
+			// the restart reload (the feed record also carries its recent rounds, so
+			// a reload prices without waiting out the next publication).
+			if _, isFeed := feedByID[ch.ContractID]; isFeed {
+				dirtyFeed[ch.ContractID] = removed
+			} else if _, isAggregator := aggregatorByID[ch.ContractID]; isAggregator {
+				dirtyAggregator[ch.ContractID] = removed
+			} else if _, isOracle := oracleByID[ch.ContractID]; isOracle {
 				dirtyOracle[ch.ContractID] = removed
 			} else if _, isPool := poolByID[ch.ContractID]; isPool {
 				dirtyPool[ch.ContractID] = removed
@@ -304,9 +374,31 @@ func (a *Adapter) ConfigRecords(next *bindings.LedgerState, changes []bindings.C
 		}
 	}
 
-	records := make([]bindings.ConfigRecord, 0, len(dirtyOracle)+len(dirtyPool)+len(dirtyReserve))
+	records := make([]bindings.ConfigRecord, 0, len(dirtyOracle)+len(dirtyPool)+len(dirtyReserve)+len(dirtyAggregator)+len(dirtyFeed))
 	seq := uint32(ledgerSeq)
 
+	for id, removed := range dirtyAggregator {
+		if removed {
+			records = append(records, tombstone(kindOracle, id, seq))
+			continue
+		}
+		a, ok := aggregatorByID[id]
+		if !ok {
+			continue
+		}
+		records = append(records, bindings.ConfigRecord{Kind: kindOracle, EntityKey: id, Ledger: seq, Payload: marshalAggregatorBody(a)})
+	}
+	for id, removed := range dirtyFeed {
+		if removed {
+			records = append(records, tombstone(kindOracle, id, seq))
+			continue
+		}
+		f, ok := feedByID[id]
+		if !ok {
+			continue
+		}
+		records = append(records, bindings.ConfigRecord{Kind: kindOracle, EntityKey: id, Ledger: seq, Payload: marshalFeedBody(f)})
+	}
 	for id, removed := range dirtyOracle {
 		if removed {
 			records = append(records, tombstone(kindOracle, id, seq))
@@ -435,6 +527,80 @@ func marshalOracleBody(o contracts.OracleState) []byte {
 	return mustMarshal(body)
 }
 
+// marshalAggregatorBody serializes an oracle-aggregator's carried config as an
+// extended blend.oracle payload. The top-level assets list mirrors the
+// synthetic asset->index map resolveAggregatorPrices derives (sorted asset IDs,
+// index = position), so the blend_oracle_asset view reads the same mapping the
+// fold prices with.
+func marshalAggregatorBody(a contracts.OracleAggregatorState) []byte {
+	body := oracleConfigBody{
+		Decimals: a.Decimals,
+		Aggregator: &aggregatorConfigBody{
+			MaxAgeS:    a.MaxAgeS,
+			BaseKey:    a.BaseKey,
+			BaseAssets: append([]string(nil), a.BaseAssets...),
+		},
+	}
+	assetIDs := make([]string, 0, len(a.Assets))
+	for _, asset := range a.Assets {
+		assetIDs = append(assetIDs, asset.AssetID)
+		body.Aggregator.AssetsCfg = append(body.Aggregator.AssetsCfg, aggregatorAssetBody{
+			AssetID:      asset.AssetID,
+			FeedAssetKey: asset.FeedAssetKey,
+			OracleIndex:  asset.OracleIndex,
+			MaxDev:       asset.MaxDev,
+		})
+	}
+	sort.Strings(assetIDs)
+	for i, assetID := range assetIDs {
+		body.Assets = append(body.Assets, oracleAssetBody{AssetID: assetID, Index: int64(i)})
+	}
+	sort.Slice(body.Aggregator.AssetsCfg, func(i, j int) bool {
+		return body.Aggregator.AssetsCfg[i].AssetID < body.Aggregator.AssetsCfg[j].AssetID
+	})
+	for _, feed := range a.Feeds {
+		body.Aggregator.Feeds = append(body.Aggregator.Feeds, aggregatorFeedBody{
+			Index:       feed.Index,
+			ContractID:  feed.ContractID,
+			Decimals:    feed.Decimals,
+			ResolutionS: feed.ResolutionS,
+		})
+	}
+	sort.Slice(body.Aggregator.Feeds, func(i, j int) bool {
+		return body.Aggregator.Feeds[i].Index < body.Aggregator.Feeds[j].Index
+	})
+	return mustMarshal(body)
+}
+
+// marshalFeedBody serializes a Reflector feed's carried state — asset list plus
+// the bounded recent rounds — as an extended blend.oracle payload.
+func marshalFeedBody(f contracts.PriceFeedState) []byte {
+	body := oracleConfigBody{
+		Decimals: f.Decimals,
+		Feed:     &feedConfigBody{LastRoundMs: f.LastRoundMs},
+	}
+	for _, asset := range f.Assets {
+		body.Assets = append(body.Assets, oracleAssetBody{AssetID: asset.AssetKey, Index: asset.Index})
+	}
+	sort.Slice(body.Assets, func(i, j int) bool {
+		if body.Assets[i].Index != body.Assets[j].Index {
+			return body.Assets[i].Index < body.Assets[j].Index
+		}
+		return body.Assets[i].AssetID < body.Assets[j].AssetID
+	})
+	for _, round := range f.Rounds {
+		rb := feedRoundBody{TimestampMs: round.TimestampMs}
+		for _, price := range round.Prices {
+			rb.Prices = append(rb.Prices, feedRoundPriceBody{Index: price.Index, PriceRaw: price.PriceRaw})
+		}
+		body.Feed.Rounds = append(body.Feed.Rounds, rb)
+	}
+	sort.Slice(body.Feed.Rounds, func(i, j int) bool {
+		return body.Feed.Rounds[i].TimestampMs < body.Feed.Rounds[j].TimestampMs
+	})
+	return mustMarshal(body)
+}
+
 func marshalPoolBody(p contracts.PoolState) []byte {
 	return mustMarshal(poolConfigBody{
 		Oracle:   p.OracleContract,
@@ -491,6 +657,8 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 	pools := map[string]*contracts.PoolState{}
 	reservesByPool := map[string][]contracts.ReserveState{}
 	oracles := []contracts.OracleState{}
+	aggregators := []contracts.OracleAggregatorState{}
+	feeds := []contracts.PriceFeedState{}
 	// Prices are a separate facet keyed by (oracle, index); stitch them onto their
 	// oracle's map after both facets are read, so the reload reconstructs a COMPLETE
 	// OracleState{Decimals, Assets, Prices} and the first post-restart ledger has no
@@ -506,6 +674,16 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 			var body oracleConfigBody
 			if err := json.Unmarshal(rec.Payload, &body); err != nil {
 				return nil, err
+			}
+			// Extended payloads route to their carried-state slice; a plain body
+			// stays a price-writing oracle's map, exactly as before.
+			if body.Aggregator != nil {
+				aggregators = append(aggregators, hydrateAggregator(rec.EntityKey, body))
+				continue
+			}
+			if body.Feed != nil {
+				feeds = append(feeds, hydrateFeed(rec.EntityKey, body))
+				continue
 			}
 			oracle := contracts.OracleState{ContractID: rec.EntityKey, Decimals: body.Decimals}
 			for _, asset := range body.Assets {
@@ -585,5 +763,64 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 	}
 	sort.Slice(oracles, func(i, j int) bool { return oracles[i].ContractID < oracles[j].ContractID })
 	state.Oracles = oracles
+	if len(aggregators) > 0 {
+		sort.Slice(aggregators, func(i, j int) bool { return aggregators[i].ContractID < aggregators[j].ContractID })
+		state.OracleAggregators = aggregators
+	}
+	if len(feeds) > 0 {
+		sort.Slice(feeds, func(i, j int) bool { return feeds[i].ContractID < feeds[j].ContractID })
+		state.PriceFeeds = feeds
+	}
 	return state, nil
+}
+
+// hydrateAggregator rebuilds an oracle-aggregator's carried config from its
+// persisted record.
+func hydrateAggregator(contractID string, body oracleConfigBody) contracts.OracleAggregatorState {
+	agg := contracts.OracleAggregatorState{
+		ContractID: contractID,
+		Decimals:   body.Decimals,
+		MaxAgeS:    body.Aggregator.MaxAgeS,
+		BaseKey:    body.Aggregator.BaseKey,
+		BaseAssets: append([]string(nil), body.Aggregator.BaseAssets...),
+	}
+	for _, feed := range body.Aggregator.Feeds {
+		agg.Feeds = append(agg.Feeds, contracts.AggregatorFeedRef{
+			Index:       feed.Index,
+			ContractID:  feed.ContractID,
+			Decimals:    feed.Decimals,
+			ResolutionS: feed.ResolutionS,
+		})
+	}
+	for _, asset := range body.Aggregator.AssetsCfg {
+		agg.Assets = append(agg.Assets, contracts.AggregatorAssetConfig{
+			AssetID:      asset.AssetID,
+			FeedAssetKey: asset.FeedAssetKey,
+			OracleIndex:  asset.OracleIndex,
+			MaxDev:       asset.MaxDev,
+		})
+	}
+	return agg
+}
+
+// hydrateFeed rebuilds a Reflector feed's carried state — including the
+// bounded recent rounds, so the first post-restart ledger prices immediately —
+// from its persisted record.
+func hydrateFeed(contractID string, body oracleConfigBody) contracts.PriceFeedState {
+	feed := contracts.PriceFeedState{
+		ContractID:  contractID,
+		Decimals:    body.Decimals,
+		LastRoundMs: body.Feed.LastRoundMs,
+	}
+	for _, asset := range body.Assets {
+		feed.Assets = append(feed.Assets, contracts.FeedAssetIndex{AssetKey: asset.AssetID, Index: asset.Index})
+	}
+	for _, round := range body.Feed.Rounds {
+		fr := contracts.FeedRound{TimestampMs: round.TimestampMs}
+		for _, price := range round.Prices {
+			fr.Prices = append(fr.Prices, contracts.FeedRoundPrice{Index: price.Index, PriceRaw: price.PriceRaw})
+		}
+		feed.Rounds = append(feed.Rounds, fr)
+	}
+	return feed
 }

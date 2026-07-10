@@ -262,7 +262,7 @@ func TestDecodeState_DeltasSorted(t *testing.T) {
 	adapter := newTestAdapter(t)
 	changes := representativeChanges(t)
 
-	_, deltas := adapter.decodeBlendState(nil, changes, 123)
+	_, deltas := adapter.decodeBlendState(nil, changes, 123, time.Time{})
 	if len(deltas) == 0 {
 		t.Fatal("expected deltas to be emitted")
 	}

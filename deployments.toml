@@ -14,7 +14,7 @@
 # Schema (one [[pin]] table per contract):
 #   network        "testnet" | "public"
 #   contract_id    Stellar contract id (C...)
-#   role           "pool" | "oracle" | "backstop"
+#   role           "pool" | "oracle" | "backstop" | "price_feed"
 #   deploy_ledger  int; OMIT if uncurated
 #   source         where the value came from
 #   notes          free text
@@ -79,3 +79,27 @@ role = "pool"
 deploy_ledger = 56615475
 source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
 notes = "FixedV2 pool, create_contract 2025-04-14 17:46:46 UTC."
+
+# --- public / mainnet Reflector price feeds ---------------------------------
+# The pools' registered oracles above are oracle-aggregator VIEW contracts:
+# they never write a price on-ledger. The actual price writes live in these
+# Reflector feeds, registered with the relay as price_feeds. Their 2024 create
+# ledgers do NOT gate the ingest floor: the feeds re-publish every 300 s and
+# rewrite their instance (asset list + last_timestamp) in the same transaction,
+# so any fold window is fully configured within one round of its floor. The
+# floor-critical pins remain the aggregators' create ledgers above (the
+# aggregator config is the write the fold cannot recover otherwise).
+
+[[pin]]
+network = "public"
+contract_id = "CAFJZQWSED6YAWZU3GWRTOCNPPCGBN32L7QV43XX5LZLFTK6JLN34DLN"
+role = "price_feed"
+source = "on-chain PoolConfig->aggregator instance Oracles entry, decoded from mainnet ledger 56569303 raw meta"
+notes = "Reflector 'External CEXs & DEXs' feed (created 2024-03-04), base fiat USD, 14 decimals, 300s resolution. Backs the FixedV2 aggregator CCVTVW2C... (ticker-keyed assets: XLM, USDC, EURC)."
+
+[[pin]]
+network = "public"
+contract_id = "CALI2BYU2JE6WVRUFYTS6MSBNEHGJ35P4AVCZYF3B6QOE3QKOB2PLE6M"
+role = "price_feed"
+source = "yieldblox/oracle-aggregator live instance storage read 2026-07-10 (stellar.expert validated build)"
+notes = "Reflector 'Stellar Mainnet DEX' feed (created 2024-03-04), base USDC token CCW67TSZ..., 14 decimals, 300s resolution. Backs the YieldBloxV2 aggregator CD74A3C5... (address-keyed assets)."

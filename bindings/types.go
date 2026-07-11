@@ -69,6 +69,64 @@ type LedgerState struct {
 	// symbol/name/decimals. Carried state only — never emitted to gold; it feeds
 	// Reserve.Metadata / Activity.AssetSymbol in the transform instead.
 	Assets []contracts.AssetMetadata
+	// AMMPools and AMMPositions are the protocol-neutral state carrier for
+	// share-based and concentrated-liquidity AMMs. They intentionally sit beside
+	// the legacy Blend slices so existing checkpoints remain JSON-compatible.
+	AMMPools     []AMMPoolState
+	AMMPositions []AMMPositionState
+	AMMAssets    []AMMAssetMetadata
+}
+
+type AMMAssetMetadata struct {
+	ContractID string
+	Symbol     string
+	Name       string
+	Decimals   int32
+}
+
+type AMMTokenReserve struct {
+	AssetID    string
+	Decimals   int32
+	ReserveRaw string
+}
+
+type AMMPoolState struct {
+	Protocol               string
+	RouterContract         string
+	PoolHash               string
+	ContractID             string
+	WasmHash               string
+	PoolType               string // constant_product | stable | concentrated
+	Tokens                 []AMMTokenReserve
+	TotalSharesRaw         string
+	FeeFractionRaw         string
+	ProtocolFeeFractionRaw string
+	AmplificationRaw       string
+	TickSpacing            int32
+	SqrtPriceX96           string
+	CurrentTick            int32
+	ActiveLiquidityRaw     string
+	FeeGrowthGlobal0X128   string
+	FeeGrowthGlobal1X128   string
+}
+
+type AMMPositionState struct {
+	Address                  string
+	PoolContractID           string
+	SharesRaw                string
+	TickLower                int32
+	TickUpper                int32
+	LiquidityRaw             string
+	SqrtPriceLowerX96        string
+	SqrtPriceUpperX96        string
+	Principal0Raw            string
+	Principal1Raw            string
+	PendingFee0Raw           string
+	PendingFee1Raw           string
+	RewardTokenID            string
+	PendingRewardRaw         string
+	WeightedLiquidityRaw     string
+	RewardCheckpointEligible bool
 }
 
 // ContractDataChange is the shared vocabulary between the relay's
@@ -308,4 +366,76 @@ type TransformOutput struct {
 	Backstops        []Backstop
 	Contracts        []Contract
 	Quarantine       []QuarantineEvent
+	AMMPools         []AMMPool
+	AMMComponents    []AMMPositionComponent
+	AMMRewards       []AMMReward
+}
+
+type AMMPool struct {
+	Protocol               string
+	RouterContract         string
+	PoolHash               string
+	ContractID             string
+	PoolType               string
+	WasmHash               string
+	Tokens                 []AMMTokenReserve
+	TotalSharesRaw         string
+	FeeFractionRaw         string
+	ProtocolFeeFractionRaw string
+	AmplificationRaw       string
+	TickSpacing            int32
+	SqrtPriceX96           string
+	CurrentTick            int32
+	ActiveLiquidityRaw     string
+	LedgerSeq              int64
+	Timestamp              time.Time
+	Metadata               map[string]string
+}
+
+type AMMPositionComponent struct {
+	ID              string
+	PositionGroupID string
+	Address         string
+	Protocol        string
+	PoolContractID  string
+	ComponentKind   string // lp_principal | range_principal | unclaimed_fee
+	AssetID         string
+	AmountRaw       string
+	ShareAmountRaw  string
+	TickLower       *int32
+	TickUpper       *int32
+	USDValue        string
+	APR             string
+	LedgerSeq       int64
+	Timestamp       time.Time
+	Metadata        map[string]string
+}
+
+type AMMReward struct {
+	ID              string
+	PositionGroupID string
+	Address         string
+	Protocol        string
+	PoolContractID  string
+	RewardContract  string
+	RewardTokenID   string
+	RewardKind      string // aqua | incentive
+	AmountRaw       string
+	USDValue        string
+	LedgerSeq       int64
+	Timestamp       time.Time
+	Metadata        map[string]string
+}
+
+// StateStats lets the relay report health without inspecting protocol-specific
+// state slices.
+type StateStats struct{ Pools, Users, Backstops int }
+
+type StateReporter interface{ StateStats(*LedgerState) StateStats }
+
+// AssetRegistrar lets the relay register token contracts discovered in prior
+// folded state without knowing a protocol's state layout.
+type AssetRegistrar interface {
+	RegisterAssetContracts(ids ...string)
+	StateAssetContracts(*LedgerState) []string
 }

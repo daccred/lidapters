@@ -1,45 +1,130 @@
-// Package aquarius is the scaffold for the Aquarius protocol adapter. It
-// satisfies the bindings.ProtocolAdapter seam so the multi-protocol wiring can
-// be exercised end to end, but no decode or transform logic is implemented yet:
-// every fold entry point returns ErrNotImplemented.
 package aquarius
 
 import (
-	"errors"
+	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/daccred/lidapters/bindings"
 )
 
-// ErrNotImplemented is returned by every adapter method that would need real
-// Aquarius decode/transform logic.
-var ErrNotImplemented = errors.New("aquarius: adapter not implemented")
+type Config struct {
+	AdapterID        string
+	Protocol         string
+	Routers          map[string]struct{}
+	PoolWasmHashes   map[string]string // hash -> pool type
+	AllowUnknownWasm bool
+}
+
+func DefaultConfig() Config { return Config{AdapterID: "aquarius", Protocol: "aquarius"} }
+
+type Adapter struct {
+	cfg       Config
+	contracts map[string]struct{}
+	assets    map[string]struct{}
+}
 
 var _ bindings.ProtocolAdapter = (*Adapter)(nil)
+var _ bindings.StateReporter = (*Adapter)(nil)
+var _ bindings.AssetRegistrar = (*Adapter)(nil)
 
-type Adapter struct{}
+// New preserves the original scaffold constructor for downstream callers.
+func New() *Adapter { a, _ := NewWithConfig(Config{}); return a }
 
-func New() *Adapter {
-	return &Adapter{}
+func NewWithConfig(config Config) (*Adapter, error) {
+	cfg := DefaultConfig()
+	{
+		c := config
+		if c.AdapterID != "" {
+			cfg.AdapterID = c.AdapterID
+		}
+		if c.Protocol != "" {
+			cfg.Protocol = c.Protocol
+		}
+		cfg.AllowUnknownWasm = c.AllowUnknownWasm
+		cfg.Routers = copySet(c.Routers)
+		cfg.PoolWasmHashes = map[string]string{}
+		for k, v := range c.PoolWasmHashes {
+			cfg.PoolWasmHashes[strings.ToLower(k)] = v
+		}
+	}
+	if cfg.AdapterID == "" || cfg.Protocol == "" {
+		return nil, fmt.Errorf("aquarius: adapter id and protocol are required")
+	}
+	a := &Adapter{cfg: cfg, contracts: map[string]struct{}{}, assets: map[string]struct{}{}}
+	for id := range cfg.Routers {
+		a.contracts[id] = struct{}{}
+	}
+	return a, nil
 }
 
-func (a *Adapter) ID() string {
-	return "aquarius"
+func copySet(in map[string]struct{}) map[string]struct{} {
+	out := map[string]struct{}{}
+	for k := range in {
+		if strings.TrimSpace(k) != "" {
+			out[k] = struct{}{}
+		}
+	}
+	return out
 }
-
-func (a *Adapter) Protocol() string {
-	return "aquarius"
+func (a *Adapter) ID() string       { return a.cfg.AdapterID }
+func (a *Adapter) Protocol() string { return a.cfg.Protocol }
+func (a *Adapter) OwnsContract(id string) bool {
+	_, ok := a.contracts[id]
+	if ok {
+		return true
+	}
+	_, ok = a.assets[id]
+	return ok
 }
-
-// OwnsContract reports false for everything: the scaffold owns no contracts
-// until discovery and configuration are implemented.
-func (a *Adapter) OwnsContract(contractID string) bool {
-	return false
+func (a *Adapter) RegisterContracts(ids ...string) {
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			a.contracts[id] = struct{}{}
+		}
+	}
 }
-
-func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64) (*bindings.LedgerState, error) {
-	return nil, ErrNotImplemented
+func (a *Adapter) RegisterAssetContracts(ids ...string) {
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			a.assets[id] = struct{}{}
+		}
+	}
 }
-
-func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformOutput, error) {
-	return nil, ErrNotImplemented
+func (a *Adapter) StateAssetContracts(s *bindings.LedgerState) []string {
+	set := map[string]struct{}{}
+	if s != nil {
+		for _, p := range s.AMMPools {
+			if p.Protocol == a.cfg.Protocol {
+				for _, t := range p.Tokens {
+					if t.AssetID != "" {
+						set[t.AssetID] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+func (a *Adapter) StateStats(s *bindings.LedgerState) bindings.StateStats {
+	var x bindings.StateStats
+	if s == nil {
+		return x
+	}
+	for _, p := range s.AMMPools {
+		if p.Protocol == a.cfg.Protocol {
+			x.Pools++
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, p := range s.AMMPositions {
+		seen[p.Address] = struct{}{}
+	}
+	x.Users = len(seen)
+	return x
 }

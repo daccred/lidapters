@@ -42,6 +42,13 @@ source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
 notes = "Blend testnet oracle, deploy 2026-06-26 07:31:18 UTC. Exact create_contract ledger 3288990 (replaces the 3294000 SHELLBOOK bootstrap approximation). The oracle instance (asset->index) is written here and not re-emitted at 3294000, so 3288990 is the correct floor to avoid null HF."
 
 # --- public / mainnet (verified — exact create_contract ledgers) -----------
+
+[[pin]]
+network = "public"
+contract_id = "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"
+role = "aquarius_router"
+source = "Aquarius documentation; deploy ledger not yet curated"
+notes = "Canonical public Aquarius AMM router. Deliberately unpinned and fail-closed until its exact create_contract ledger is verified."
 # Resolved via scratchpad/deploy-ledger, exact Stellar-Expert close-time match
 # (HIGH). deploy = create_contract ledger = where the oracle INSTANCE entry
 # (asset->index) is written = the correct, safe ingest floor for Cause B.

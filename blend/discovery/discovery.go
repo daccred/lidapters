@@ -61,6 +61,15 @@ func DiscoverPoolsFromMeta(rawMeta []byte, factoryIDs map[string]struct{}) ([]Di
 	if err := xdr.SafeUnmarshal(rawMeta, &lcm); err != nil {
 		return nil, fmt.Errorf("discover pools: decode LedgerCloseMeta: %w", err)
 	}
+	return DiscoverPoolsFromLedgerCloseMeta(lcm, factoryIDs)
+}
+
+// DiscoverPoolsFromLedgerCloseMeta is the decoded-input form used by relay's
+// predecode pipeline. It keeps discovery pure while avoiding a second XDR decode.
+func DiscoverPoolsFromLedgerCloseMeta(lcm xdr.LedgerCloseMeta, factoryIDs map[string]struct{}) ([]DiscoveredPool, error) {
+	if len(factoryIDs) == 0 {
+		return nil, nil
+	}
 	ledgerSeq := int64(lcm.LedgerSequence())
 
 	seen := map[string]DiscoveredPool{}

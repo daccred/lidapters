@@ -79,7 +79,10 @@ func (a *Adapter) ConfigSchema() []bindings.ConfigTableSchema {
 				Body: "SELECT entity_key AS oracle_id, ledger, removed,\n" +
 					"       (asset->>'asset_id') AS asset_id,\n" +
 					"       NULLIF(asset->>'index','')::int AS asset_index\n" +
-					"FROM blend_oracle_config, jsonb_array_elements(payload->'assets') AS asset",
+					"FROM blend_oracle_config\n" +
+					"CROSS JOIN LATERAL jsonb_array_elements(\n" +
+					"  CASE WHEN jsonb_typeof(payload->'assets')='array' THEN payload->'assets' ELSE '[]'::jsonb END\n" +
+					") AS asset",
 			}},
 		},
 		{

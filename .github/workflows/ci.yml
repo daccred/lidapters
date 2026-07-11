@@ -40,7 +40,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         # advisory until the lint backlog is triaged (repo has no prior lint history)
         continue-on-error: true
         with:

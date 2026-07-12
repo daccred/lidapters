@@ -114,13 +114,19 @@ type ProtocolAdapter interface {
 	// than in the relay core) is what makes each protocol self-contained — event
 	// decode, state decode, and transform in one place.
 	//
-	// It is a stateless PURE reducer — (prior, changes, ledgerSeq) -> next, with
-	// no DB/network/clock/random and no hidden accumulator retained on the
-	// adapter. With no per-ledger scratch, folding the same input twice yields
-	// byte-identical output: there is nothing to leak map-iteration order or
-	// time.Now between calls; all carry-over threads through *LedgerState
+	// It is a PURE reducer — (prior, changes, ledgerSeq) -> next, with no
+	// DB/network/clock/random: folding the same input twice yields
+	// byte-identical output, and all carry-over threads through *LedgerState
 	// (PendingUserPositions carries the one piece of raw scratch that does not
 	// otherwise round-trip).
+	//
+	// An adapter MAY internally carry a mirror of its own last returned state as
+	// a performance optimization (blend's incremental state mode does), provided
+	// the functional contract is preserved: the carried mirror is only trusted
+	// when prior IS the adapter's own previous return value, any other prior
+	// reseeds from it, and the returned state is treated by both sides as
+	// immutable. Such an adapter is not shareable across concurrent folds; the
+	// default blend mode (paranoid) remains fully stateless.
 	DecodeState(prior *LedgerState, changes []ContractDataChange, ledgerSeq int64) (*LedgerState, error)
 
 	// Transform folds events + typed state into gold. Pure; unchanged by the fold.

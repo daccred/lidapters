@@ -39,9 +39,14 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 // DecodeState path) falls back to each feed's newest round timestamp as the
 // reference "now", which prices the freshest round but cannot observe a feed
 // that stopped publishing.
+//
+// The fold itself is delegated to the strategy selected at New
+// (Config.StateMode): paranoid runs the reference reducer below verbatim;
+// incremental produces byte-identical output from a carried mirror. See
+// state_strategy.go for the two-mode contract.
 func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
-	next, _ := a.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, nil
+	next, _ := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
+	return next, nil
 }
 
 // OwnsContract reports whether contractID belongs to Blend. Ownership is the
@@ -144,6 +149,20 @@ type blendStateBuilder struct {
 	// mistaken for a pool or a mock oracle.
 	ownedFeeds map[string]struct{}
 	deltas     []typedStateDelta
+	// dirtyUsers, when non-nil, collects the identity of every user-positions
+	// entry apply touches (live write or delete), keyed like pendingPos. It is
+	// nil on the paranoid path — zero behavior change there — and set by the
+	// incremental strategy, whose snapshot recomputes exactly the touched users'
+	// cached position blocks instead of rebuilding all of them.
+	dirtyUsers map[string]userIdentity
+}
+
+// userIdentity is the (address, pool) pair behind a pendingPos composite key —
+// what the incremental strategy needs to maintain its sorted user order when
+// an entry is deleted and the pendingPos value is no longer there to consult.
+type userIdentity struct {
+	address string
+	pool    string
 }
 
 // oracleBuilder accumulates the parts of a Blend price oracle that a fold needs
@@ -231,8 +250,17 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	// map order is randomized, so two runs over the same ledgers would otherwise
 	// emit them in different orders. Sort by a stable total-order key before emit
 	// so the output is byte-identical run to run.
-	sort.SliceStable(b.deltas, func(i, j int) bool {
-		di, dj := b.deltas[i], b.deltas[j]
+	sortTypedStateDeltas(b.deltas)
+
+	return b.build(closeTime), b.deltas
+}
+
+// sortTypedStateDeltas sorts the per-ledger silver-debug deltas by their stable
+// total-order key. Shared by both fold strategies so their delta streams stay
+// comparable entry for entry.
+func sortTypedStateDeltas(deltas []typedStateDelta) {
+	sort.SliceStable(deltas, func(i, j int) bool {
+		di, dj := deltas[i], deltas[j]
 		if di.EntityType != dj.EntityType {
 			return di.EntityType < dj.EntityType
 		}
@@ -247,8 +275,6 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 		}
 		return string(di.StateJSON) < string(dj.StateJSON)
 	})
-
-	return b.build(closeTime), b.deltas
 }
 
 // loadPrior reconstructs the mirror from the prior LedgerState so the reducer
@@ -625,6 +651,9 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		}
 		pending := pendingUserPositions{poolContract: change.ContractID, user: user, positions: value, valueXDR: *change.ValueXDR}
 		b.pendingPos[typedUserEntityKey(user, change.ContractID)] = pending
+		if b.dirtyUsers != nil {
+			b.dirtyUsers[typedUserEntityKey(user, change.ContractID)] = userIdentity{address: user, pool: change.ContractID}
+		}
 		b.appendUserPositions(pending, ledgerSeq)
 	case "PoolBalance":
 		poolID, ok := variantAddress(args)
@@ -752,6 +781,9 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 			return
 		}
 		delete(b.pendingPos, typedUserEntityKey(user, change.ContractID))
+		if b.dirtyUsers != nil {
+			b.dirtyUsers[typedUserEntityKey(user, change.ContractID)] = userIdentity{address: user, pool: change.ContractID}
+		}
 		b.addDelta(ledgerSeq, "user_positions", typedUserEntityKey(user, change.ContractID), false, nil)
 	case "PoolBalance":
 		poolID, ok := variantAddress(args)

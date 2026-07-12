@@ -44,6 +44,11 @@ type Adapter struct {
 	// would otherwise be misdecoded as a phantom pool. Same config-like status
 	// as contracts; does not affect DecodeState purity.
 	feeds map[string]struct{}
+	// state is the state-fold strategy DecodeState delegates to, selected once
+	// at New from Config.StateMode and swapped as a whole class — paranoid (the
+	// stateless reference reducer) or incremental (the persistent-builder
+	// optimization). See state_strategy.go for the contract between the two.
+	state stateStrategy
 }
 
 func New(cfg Config) (*Adapter, error) {
@@ -58,6 +63,7 @@ func New(cfg Config) (*Adapter, error) {
 		merged.V2Scalar = cfg.V2Scalar
 	}
 	merged.AllowUnknownV2 = cfg.AllowUnknownV2
+	merged.StateMode = cfg.StateMode
 	merged.V2WasmHashes = map[string]struct{}{}
 	for hash := range cfg.V2WasmHashes {
 		merged.V2WasmHashes[hash] = struct{}{}
@@ -72,7 +78,16 @@ func New(cfg Config) (*Adapter, error) {
 	if merged.V2Scalar == "" {
 		return nil, fmt.Errorf("v2 scalar is required")
 	}
-	return &Adapter{cfg: merged, contracts: map[string]struct{}{}}, nil
+	a := &Adapter{cfg: merged, contracts: map[string]struct{}{}}
+	switch cfg.StateMode {
+	case "", StateModeParanoid:
+		a.state = &paranoidStrategy{adapter: a}
+	case StateModeIncremental:
+		a.state = newIncrementalStrategy(a)
+	default:
+		return nil, fmt.Errorf("unknown state mode %q", cfg.StateMode)
+	}
+	return a, nil
 }
 
 func (a *Adapter) ID() string {

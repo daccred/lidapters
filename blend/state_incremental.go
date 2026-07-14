@@ -98,7 +98,7 @@ func newIncrementalStrategy(a *Adapter) *incrementalStrategy {
 	return &incrementalStrategy{adapter: a}
 }
 
-func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta) {
+func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
 	if s.mirror == nil || prior != s.lastOut || s.bisect.reloadEachLedger {
 		// Not a continuation of our own last output: rebuild the mirror from
 		// prior exactly as paranoid would. One O(total state) ledger, then the
@@ -111,9 +111,9 @@ func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes [
 		s.mirror.apply(change, ledgerSeq)
 	}
 	sortTypedStateDeltas(s.mirror.deltas)
-	out := s.snapshot(closeTime)
+	out, dirty := s.snapshot(closeTime)
 	s.lastOut = out
-	return out, s.mirror.deltas
+	return out, s.mirror.deltas, dirty
 }
 
 // reseed rebuilds the mirror from prior via the same loadPrior the paranoid
@@ -202,7 +202,7 @@ func (s *incrementalStrategy) normalizeCarry() {
 // build() in state.go — same statements, same order — except pending/users,
 // which come from the caches. Any edit to build() must be mirrored here; the
 // parity suite fails loudly when the two drift.
-func (s *incrementalStrategy) snapshot(closeTime time.Time) *bindings.LedgerState {
+func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerState, []bindings.DirtyPosition) {
 	b := s.mirror
 	b.resolveAggregatorPrices(closeTime)
 	b.resolveOraclePrices()
@@ -247,6 +247,13 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) *bindings.LedgerStat
 			}
 		}
 	}
+
+	// Captured before the cache-update loop clears entries out of pendingPos
+	// bookkeeping below (removeKey/delete don't touch b.pendingPos itself, but
+	// s.dirty is cleared at the end of this pass either way) — same derivation
+	// paranoid's decodeBlendState uses (finalizeDirtyPositions), so the two
+	// strategies expose an identical set for the same ledger.
+	dirty := finalizeDirtyPositions(s.dirty, b.pendingPos)
 
 	for composite, identity := range s.dirty {
 		pending, live := b.pendingPos[composite]
@@ -309,7 +316,7 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) *bindings.LedgerStat
 		PriceFeeds:           b.buildPriceFeeds(),
 		OracleAggregators:    b.buildOracleAggregators(),
 		Assets:               b.buildAssets(),
-	}
+	}, dirty
 }
 
 // rebuildPendingUsers is the paranoid assembly of pending/users (build()'s
@@ -369,11 +376,26 @@ func (s *incrementalStrategy) computeBlock(pending pendingUserPositions) []contr
 	return block
 }
 
+// userPositions implements dirtyUserPositions (state_strategy.go): an O(1)
+// lookup of one user's cached, already-resolved position block, keyed the
+// same way as pendingPos. Adapter.ProjectPositions (math.go) uses this to
+// make single-user projection O(dirty users) instead of scanning the whole
+// output LedgerState.Users slice.
+func (s *incrementalStrategy) userPositions(address, pool string) []contracts.UserReservePosition {
+	entry, ok := s.index[typedUserEntityKey(address, pool)]
+	if !ok {
+		return nil
+	}
+	return entry.block
+}
+
 func pendingOut(p pendingUserPositions) contracts.PendingUserPosition {
 	return contracts.PendingUserPosition{
-		Address:        p.user,
-		PoolContractID: p.poolContract,
-		PositionsXDR:   p.valueXDR,
+		Address:           p.user,
+		PoolContractID:    p.poolContract,
+		PositionsXDR:      p.valueXDR,
+		Archived:          p.archived,
+		ArchivedLedgerSeq: p.archivedLedgerSeq,
 	}
 }
 

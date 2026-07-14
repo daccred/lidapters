@@ -91,6 +91,16 @@ type ReserveState struct {
 	BorrowEmisExpirationRaw string
 	BorrowEmisIndexRaw      string
 	BorrowEmisLastTimeRaw   string
+	// Archived marks a reserve whose ResConfig/ResData entry went not-live via
+	// TTL lapse or network-level eviction rather than an explicit on-chain
+	// delete. The reserve (and its reserveByIndex slot) is kept rather than
+	// dropped, so a pool user's position still resolves against it — dropping
+	// it here would silently zero every holder's row for this asset. Cleared
+	// back to false the next time a live ResConfig/ResData write for this
+	// reserve folds. ArchivedLedgerSeq is the ledger the lapse was observed on,
+	// zero when not archived.
+	Archived          bool
+	ArchivedLedgerSeq int64
 }
 
 type UserReservePosition struct {
@@ -100,6 +110,13 @@ type UserReservePosition struct {
 	PositionType   PositionType
 	BTokensRaw     string
 	DTokensRaw     string
+	// Archived mirrors the owning PendingUserPosition's archival state (see
+	// PendingUserPosition.Archived): the user's Positions entry lapsed via TTL
+	// or eviction rather than an explicit on-chain delete, so this row is a
+	// dormant-but-restorable holding, not a live one. ArchivedLedgerSeq is the
+	// ledger the lapse was observed on, zero when not archived.
+	Archived          bool
+	ArchivedLedgerSeq int64
 }
 
 type Q4WEntry struct {
@@ -261,4 +278,17 @@ type PendingUserPosition struct {
 	Address        string
 	PoolContractID string
 	PositionsXDR   string // base64 ScVal of the user's positions map
+	// Archived marks a Positions entry that went not-live via TTL lapse or
+	// network-level eviction rather than an explicit on-chain delete (a real
+	// LedgerEntryRemoved change). Soroban archival is restorable — the holder
+	// still owns the position, it has just fallen off the live footprint — so
+	// the entry is kept (with its last known PositionsXDR) instead of purged.
+	// An explicit delete still clears the entry exactly as before. Cleared
+	// back to false the next time a live Positions write for this user folds.
+	// ArchivedLedgerSeq is the ledger the lapse was observed on, zero when not
+	// archived. Additive field: a snapshot from before this existed decodes
+	// with Archived=false, matching prior behavior for every entry it already
+	// carried (none of which could have been archived under the old code).
+	Archived          bool
+	ArchivedLedgerSeq int64
 }

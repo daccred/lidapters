@@ -13,11 +13,13 @@ package blend
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -75,8 +77,8 @@ func (r *parityRun) strategy() *incrementalStrategy {
 // red-check tests need the non-fatal form.
 func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) {
 	r.t.Helper()
-	pNext, pDeltas := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
-	iNext, iDeltas := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
+	pNext, pDeltas, pDirty := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
+	iNext, iDeltas, iDirty := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
 	r.pState, r.iState = pNext, iNext
 
 	pJSON := mustMarshalState(r.t, pNext)
@@ -86,6 +88,9 @@ func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) 
 	}
 	if !reflect.DeepEqual(pDeltas, iDeltas) {
 		return false, "delta stream mismatch"
+	}
+	if !reflect.DeepEqual(pDirty, iDirty) {
+		return false, fmt.Sprintf("dirty-positions mismatch:\nparanoid=%+v\nincremental=%+v", pDirty, iDirty)
 	}
 	return true, ""
 }
@@ -359,6 +364,260 @@ func TestIncrementalParity_EvictionTTLFixtures(t *testing.T) {
 			t.Fatalf("%s: incremental pool present = %v, want %v", sc.Scenario, got, sc.ExpectPresent)
 		}
 	}
+}
+
+// findPendingUser and findUserPosition locate one user's carried entries in a
+// folded LedgerState — the archive-fixture assertions below need to inspect
+// Archived/ArchivedLedgerSeq on both the raw carry and the resolved row.
+func findPendingUser(state *bindings.LedgerState, address, poolID string) (contracts.PendingUserPosition, bool) {
+	for _, p := range state.PendingUserPositions {
+		if p.Address == address && p.PoolContractID == poolID {
+			return p, true
+		}
+	}
+	return contracts.PendingUserPosition{}, false
+}
+
+func findUserPosition(state *bindings.LedgerState, address, poolID, assetID string) (contracts.UserReservePosition, bool) {
+	for _, u := range state.Users {
+		if u.Address == address && u.PoolContractID == poolID && u.AssetID == assetID {
+			return u, true
+		}
+	}
+	return contracts.UserReservePosition{}, false
+}
+
+// positionsArchiveFixturePool bootstraps a one-reserve pool (asset at index 2,
+// matching the GCA5FO3F-class fixture below) through both fold strategies and
+// returns the run plus the reserve's asset ID for the caller to keep folding.
+func positionsArchiveFixturePool(t *testing.T, poolID string, ledgerSeq int64) (*parityRun, string) {
+	t.Helper()
+	assetID := validContractString(t, 32)
+	poolConfig := mapVal(t, map[string]xdr.ScVal{
+		"oracle":     contractAddressVal(t, 30),
+		"bstop_rate": u32Val(1_000_000),
+		"status":     u32Val(1),
+	})
+	resConfig := mapVal(t, map[string]xdr.ScVal{
+		"index":      u32Val(2),
+		"decimals":   u32Val(7),
+		"c_factor":   u32Val(8_000_000),
+		"l_factor":   u32Val(9_000_000),
+		"reactivity": u32Val(20_000),
+		"enabled":    boolVal(true),
+	})
+	run := newParityRun(t, nil, nil)
+	run.fold(parityLedger{seq: ledgerSeq, changes: []bindings.ContractDataChange{
+		stateChange(t, poolID, symbolVal(t, "Config"), poolConfig),
+		stateChange(t, poolID, symbolVal(t, "ResList"), vecVal(contractAddressVal(t, 32))),
+		stateChange(t, poolID, variantVal(t, "ResConfig", contractAddressVal(t, 32)), resConfig),
+	}})
+	return run, assetID
+}
+
+// fixedCollateralPositions builds a Positions map holding a single Fixed
+// collateral leg at reserve index 2 — the GCA5FO3F-class shape.
+func fixedCollateralPositions(t *testing.T, amount int64) xdr.ScVal {
+	t.Helper()
+	return mapVal(t, map[string]xdr.ScVal{
+		"collateral": intMapVal(t, map[uint32]xdr.ScVal{2: i128Val(amount)}),
+	})
+}
+
+// TestIncrementalParity_DormantHolderSurvivesEviction pins the GCA5FO3F-class
+// mainnet holder Change 1 fixes: Fixed collateral {2: 10766} last touched at
+// ledger 59,972,079, then untouched for many ledgers before its entry is swept
+// by the network's own eviction (CAP-0062) — the realistic shape for a truly
+// dormant entry (Live=false, ValueXDR nil, ChangeType "evicted"; see
+// relay.lightgate.xyz/internal/relay/state/extract.go's foldEvictedKeys). Both
+// fold strategies must keep the user's position archived-but-present, byte
+// for byte, through the eviction ledger and every quiet ledger after it — the
+// old code purged it from Users AND PendingUserPositions outright.
+func TestIncrementalParity_DormantHolderSurvivesEviction(t *testing.T) {
+	t.Parallel()
+	poolID := validContractString(t, 31)
+	dormantUser := validAccountString(t, 33)
+	run, assetID := positionsArchiveFixturePool(t, poolID, 59_972_000)
+
+	run.fold(
+		// Last touched: ledger 59,972,079.
+		parityLedger{seq: 59_972_079, changes: []bindings.ContractDataChange{
+			stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 33)), fixedCollateralPositions(t, 10766)),
+		}},
+		// Untouched for many ledgers — pure carry, nothing in the change set.
+		parityLedger{seq: 59_972_200},
+		parityLedger{seq: 60_010_000},
+		// The network's own eviction sweep reports the key: Live=false,
+		// ValueXDR nil, ChangeType "evicted" — not a real on-chain delete.
+		parityLedger{seq: 60_050_000, changes: []bindings.ContractDataChange{
+			stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 33)), fixedCollateralPositions(t, 10766),
+				withLive(false), withNoValue(), withChangeType("evicted")),
+		}},
+		// More quiet ledgers after the lapse: archived, not deleted, must hold.
+		parityLedger{seq: 60_050_500},
+	)
+
+	pending, ok := findPendingUser(run.iState, dormantUser, poolID)
+	if !ok {
+		t.Fatalf("dormant holder's PendingUserPosition was purged, want archived-and-present")
+	}
+	if !pending.Archived || pending.ArchivedLedgerSeq != 60_050_000 {
+		t.Fatalf("dormant holder not archived at the eviction ledger: archived=%v ledger=%d", pending.Archived, pending.ArchivedLedgerSeq)
+	}
+	row, ok := findUserPosition(run.iState, dormantUser, poolID, assetID)
+	if !ok {
+		t.Fatalf("dormant holder's collateral row was dropped from Users, want it to keep resolving")
+	}
+	if row.BTokensRaw != "10766" || !row.Archived || row.ArchivedLedgerSeq != 60_050_000 {
+		t.Fatalf("dormant holder's row regressed: btokens=%q archived=%v ledger=%d", row.BTokensRaw, row.Archived, row.ArchivedLedgerSeq)
+	}
+}
+
+// TestIncrementalParity_PositionsTTLLapseArchives covers the other liveness
+// shape Change 1 must handle: an entry whose data DID fold this ledger but
+// whose LiveUntilLedgerSeq is already behind the current ledger (Live stays
+// true at the change-type level; DecodeState forces it not-live from the TTL
+// annotation — see apply()'s live computation). ValueXDR stays populated in
+// this shape, so the archived entry picks up the fresh value rather than the
+// carried one.
+func TestIncrementalParity_PositionsTTLLapseArchives(t *testing.T) {
+	t.Parallel()
+	poolID := validContractString(t, 41)
+	user := validAccountString(t, 43)
+	run, assetID := positionsArchiveFixturePool(t, poolID, 200)
+	lapsed := uint32(199)
+
+	run.fold(
+		parityLedger{seq: 201, changes: []bindings.ContractDataChange{
+			stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 43)), fixedCollateralPositions(t, 500)),
+		}},
+		parityLedger{seq: 202, changes: []bindings.ContractDataChange{
+			stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 43)), fixedCollateralPositions(t, 500), withLiveUntil(&lapsed)),
+		}},
+	)
+
+	pending, ok := findPendingUser(run.iState, user, poolID)
+	if !ok || !pending.Archived || pending.ArchivedLedgerSeq != 202 {
+		t.Fatalf("TTL-lapsed position not archived: present=%v archived=%v ledger=%d", ok, pending.Archived, pending.ArchivedLedgerSeq)
+	}
+	row, ok := findUserPosition(run.iState, user, poolID, assetID)
+	if !ok || row.BTokensRaw != "500" || !row.Archived {
+		t.Fatalf("TTL-lapsed row regressed: present=%v btokens=%q archived=%v", ok, row.BTokensRaw, row.Archived)
+	}
+}
+
+// TestIncrementalParity_ReserveTTLLapseArchives is Change 1's other half: a
+// reserve's ResConfig/ResData entry (not a user's Positions entry) going
+// not-live via TTL lapse/eviction must archive-in-place, keeping the
+// reserveByIndex slot so positionsFromMap keeps resolving every holder's
+// position in this asset — dropping it (the old applyDelete behavior) would
+// silently zero every one of those holders' rows. A user's position folded
+// against the still-present (now archived) reserve must keep resolving.
+func TestIncrementalParity_ReserveTTLLapseArchives(t *testing.T) {
+	t.Parallel()
+	poolID := validContractString(t, 61)
+	user := validAccountString(t, 63)
+	assetID := validContractString(t, 62)
+	run, _ := positionsArchiveFixturePool(t, poolID, 400)
+
+	// A second reserve (asset 62, index 3) alongside the fixture pool's asset
+	// 32 (index 2), so the fixture actually exercises "one reserve archives,
+	// the rest of the pool is untouched."
+	resConfig := mapVal(t, map[string]xdr.ScVal{
+		"index":      u32Val(3),
+		"decimals":   u32Val(7),
+		"c_factor":   u32Val(8_000_000),
+		"l_factor":   u32Val(9_000_000),
+		"reactivity": u32Val(20_000),
+		"enabled":    boolVal(true),
+	})
+	resData := mapVal(t, map[string]xdr.ScVal{
+		"d_rate":   i128Val(1_000_000),
+		"b_rate":   i128Val(1_000_000),
+		"b_supply": i128Val(2_000),
+		"d_supply": i128Val(500),
+	})
+	run.fold(parityLedger{seq: 401, changes: []bindings.ContractDataChange{
+		stateChange(t, poolID, symbolVal(t, "ResList"), vecVal(contractAddressVal(t, 32), contractAddressVal(t, 62))),
+		stateChange(t, poolID, variantVal(t, "ResConfig", contractAddressVal(t, 62)), resConfig),
+		stateChange(t, poolID, variantVal(t, "ResData", contractAddressVal(t, 62)), resData),
+	}})
+	run.fold(parityLedger{seq: 402, changes: []bindings.ContractDataChange{
+		stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 63)), mapVal(t, map[string]xdr.ScVal{
+			"collateral": intMapVal(t, map[uint32]xdr.ScVal{3: i128Val(750)}),
+		})),
+	}})
+
+	lapsed := uint32(403)
+	run.fold(parityLedger{seq: 404, changes: []bindings.ContractDataChange{
+		stateChange(t, poolID, variantVal(t, "ResData", contractAddressVal(t, 62)), resData, withLiveUntil(&lapsed)),
+	}})
+
+	reserve := findReserve(t, run.iState, poolID, assetID)
+	if !reserve.Archived || reserve.ArchivedLedgerSeq != 404 {
+		t.Fatalf("TTL-lapsed reserve not archived-in-place: archived=%v ledger=%d", reserve.Archived, reserve.ArchivedLedgerSeq)
+	}
+	row, ok := findUserPosition(run.iState, user, poolID, assetID)
+	if !ok || row.BTokensRaw != "750" {
+		t.Fatalf("user's position against the archived reserve stopped resolving: present=%v btokens=%q", ok, row.BTokensRaw)
+	}
+}
+
+// TestIncrementalParity_ExplicitCloseSurfacesRemoval is the control case for
+// Change 1's discriminator: a genuine on-chain delete (ChangeType a
+// LedgerEntryChangeTypeLedgerEntryRemoved string) must still purge the entry
+// exactly as before — never archive — and Change 2's exposed dirty set must
+// report it as a DirtyRemoval, not a DirtyUpsert (an archived TTL-lapse is a
+// DirtyUpsert; see bindings.DirtyKind's doc). Both fold strategies must agree.
+func TestIncrementalParity_ExplicitCloseSurfacesRemoval(t *testing.T) {
+	t.Parallel()
+	poolID := validContractString(t, 51)
+	user := validAccountString(t, 53)
+	run, _ := positionsArchiveFixturePool(t, poolID, 300)
+
+	run.fold(parityLedger{seq: 301, changes: []bindings.ContractDataChange{
+		stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 53)), fixedCollateralPositions(t, 1_000)),
+	}})
+
+	// Drive the removal ledger through Adapter.DecodeStateAt directly (not the
+	// bare strategy foldLedger uses) so LastDirtyPositions — the adapter-level
+	// exposure Change 2 adds — is actually populated.
+	removal := []bindings.ContractDataChange{
+		stateChange(t, poolID, variantVal(t, "Positions", accountAddressVal(t, 53)), fixedCollateralPositions(t, 0),
+			withLive(false), withNoValue(), withChangeType("LedgerEntryChangeTypeLedgerEntryRemoved")),
+	}
+	pNext, err := run.paranoid.DecodeStateAt(run.pState, removal, 302, time.Time{})
+	if err != nil {
+		t.Fatalf("paranoid decode: %v", err)
+	}
+	iNext, err := run.incremental.DecodeStateAt(run.iState, removal, 302, time.Time{})
+	if err != nil {
+		t.Fatalf("incremental decode: %v", err)
+	}
+	run.pState, run.iState = pNext, iNext
+
+	if _, ok := findPendingUser(run.iState, user, poolID); ok {
+		t.Fatalf("explicit close should purge the PendingUserPosition, found it still present")
+	}
+	if _, ok := findUserPosition(run.iState, user, poolID, ""); ok {
+		t.Fatalf("explicit close should leave no resolved row for the user")
+	}
+
+	pDirty := run.paranoid.LastDirtyPositions()
+	iDirty := run.incremental.LastDirtyPositions()
+	assertRemoval := func(who string, dirty []bindings.DirtyPosition) {
+		for _, d := range dirty {
+			if d.Address == user && d.PoolContractID == poolID {
+				if d.Kind != bindings.DirtyRemoval {
+					t.Fatalf("%s: explicit close reported as %s, want %s", who, d.Kind, bindings.DirtyRemoval)
+				}
+				return
+			}
+		}
+		t.Fatalf("%s: explicit close missing from dirty set entirely", who)
+	}
+	assertRemoval("paranoid", pDirty)
+	assertRemoval("incremental", iDirty)
 }
 
 // TestIncrementalParity_CheckpointReseed is the checkpoint-restore path: the

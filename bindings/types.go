@@ -133,6 +133,48 @@ type ProtocolAdapter interface {
 	Transform(input TransformInput) (*TransformOutput, error)
 }
 
+// DirtyKind classifies one entry of a per-ledger dirty-positions set: whether
+// the (address, pool) pair still has positions after the fold (Upsert) or its
+// Positions entry was explicitly removed on-chain this ledger (Removal). A
+// TTL lapse or network eviction is reported as Upsert, not Removal — Change 1
+// (see blend/state.go's applyDelete) archives rather than deletes those, so
+// the entry still has positions (flagged Archived); only a real
+// LedgerEntryRemoved change is a Removal.
+type DirtyKind string
+
+const (
+	DirtyUpsert  DirtyKind = "upsert"
+	DirtyRemoval DirtyKind = "removal"
+)
+
+// DirtyPosition is one (address, pool) pair whose position changed on the
+// ledger just folded, plus the kind of change. See DirtyPositionsProvider.
+type DirtyPosition struct {
+	Address        string
+	PoolContractID string
+	Kind           DirtyKind
+}
+
+// DirtyPositionsProvider is an additive capability an adapter MAY implement
+// alongside ProtocolAdapter: after a DecodeState/DecodeStateAt call, it
+// reports exactly which (address, pool) position pairs that ledger's changes
+// touched, and whether each was an upsert or a tombstone removal. It is the
+// per-ledger analog of re-scanning the whole LedgerState.Users slice for
+// diffs: a consumer computing per-ledger emission projects ONLY the dirty
+// pairs (see a protocol-specific single-user projection helper, e.g. blend's
+// Adapter.ProjectPositions) instead of every user in state, dropping the cost
+// from O(all users) to O(dirty users).
+//
+// LastDirtyPositions reflects the most recent DecodeState/DecodeStateAt call
+// on that adapter instance and is overwritten by the next one — same
+// single-fold-at-a-time contract as the incremental state mode (see
+// ProtocolAdapter.DecodeState's doc on carried mirrors): do not share one
+// adapter across concurrent folds and read this immediately after folding,
+// before the next ledger.
+type DirtyPositionsProvider interface {
+	LastDirtyPositions() []DirtyPosition
+}
+
 // CloseTimeStateDecoder is the close-time-aware variant of DecodeState. The
 // ledger close time comes from the same close-meta the changes were extracted
 // from — it is fold INPUT, not a clock read, so purity holds: (prior, changes,

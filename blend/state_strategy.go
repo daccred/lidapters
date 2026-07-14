@@ -29,13 +29,30 @@ import (
 	"time"
 
 	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 )
 
 // stateStrategy folds one ledger's owned contract_data changes into the next
-// typed LedgerState (plus the in-package silver-debug deltas). Implementations
-// own the entire chain; DecodeState/DecodeStateAt delegate here blindly.
+// typed LedgerState (plus the in-package silver-debug deltas and the exposed
+// dirty-positions set — see bindings.DirtyPosition). Implementations own the
+// entire chain; DecodeState/DecodeStateAt delegate here blindly.
 type stateStrategy interface {
-	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta)
+	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition)
+}
+
+// dirtyUserPositions is an optional capability a stateStrategy MAY implement:
+// answer one user's resolved position rows in O(1) rather than requiring a
+// caller to scan the whole output LedgerState.Users slice. The incremental
+// strategy already maintains exactly this index (s.index, keyed the same way
+// as pendingPos) to serve its own cached-block invalidation, so exposing it
+// costs nothing extra. Adapter.ProjectPositions (math.go) uses this when the
+// active strategy implements it, which is what makes a per-ledger dirty-set
+// projection genuinely O(dirty users) instead of O(all users) — paranoid does
+// not implement it (it caches nothing) and ProjectPositions falls back to a
+// full scan for that mode, which is no worse than paranoid's existing
+// O(total state) per-ledger cost.
+type dirtyUserPositions interface {
+	userPositions(address, pool string) []contracts.UserReservePosition
 }
 
 // paranoidStrategy delegates to the reference reducer (decodeBlendState in
@@ -44,7 +61,7 @@ type paranoidStrategy struct {
 	adapter *Adapter
 }
 
-func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta) {
-	next, deltas := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, deltas
+func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
+	next, deltas, dirty := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
+	return &next, deltas, dirty
 }

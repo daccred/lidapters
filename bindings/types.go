@@ -204,6 +204,36 @@ type TransformInput struct {
 	CloseTime time.Time
 	Events    []RawEventEnvelope
 	State     *LedgerState
+	// PriorPositions carries the previous ledger's gold Position output,
+	// enabling the adapter to diff and emit tombstones for legs that
+	// disappeared (went to zero or were evicted). May be nil on the first
+	// ledger or when the relay does not support tombstone emission.
+	PriorPositions []Position
+	// PriorSummaries carries the previous ledger's gold PositionSummary
+	// output for the same diff-and-tombstone purpose. May be nil.
+	PriorSummaries []PositionSummary
+}
+
+// PositionTombstone marks a position leg that should be marked as deleted
+// in Gold at this ledger. The relay inserts a tombstone row with
+// is_deleted=TRUE at LedgerSeq so the current-view (filtered by NOT
+// is_deleted) no longer shows the phantom last nonzero value.
+type PositionTombstone struct {
+	Address      string
+	Protocol     string
+	ContractID   string
+	AssetID      string
+	PositionType string
+	LedgerSeq    int64
+}
+
+// SummaryTombstone marks a per-account summary that should be marked as
+// deleted in Gold at this ledger. Emitted only when the address has no
+// remaining Blend reserve or backstop positions of any kind.
+type SummaryTombstone struct {
+	Address   string
+	Protocol  string
+	LedgerSeq int64
 }
 
 type Activity struct {
@@ -357,18 +387,20 @@ type QuarantineEvent struct {
 }
 
 type TransformOutput struct {
-	LedgerSeq        int64
-	Activities       []Activity
-	Positions        []Position
-	Summaries        []PositionSummary
-	Reserves         []Reserve
-	ReserveEmissions []ReserveEmission
-	Backstops        []Backstop
-	Contracts        []Contract
-	Quarantine       []QuarantineEvent
-	AMMPools         []AMMPool
-	AMMComponents    []AMMPositionComponent
-	AMMRewards       []AMMReward
+	LedgerSeq         int64
+	Activities        []Activity
+	Positions         []Position
+	Summaries         []PositionSummary
+	Reserves          []Reserve
+	ReserveEmissions  []ReserveEmission
+	Backstops         []Backstop
+	Contracts         []Contract
+	Quarantine        []QuarantineEvent
+	AMMPools          []AMMPool
+	AMMComponents     []AMMPositionComponent
+	AMMRewards        []AMMReward
+	PositionTombstones []PositionTombstone
+	SummaryTombstones []SummaryTombstone
 }
 
 type AMMPool struct {

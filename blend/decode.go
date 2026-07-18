@@ -18,6 +18,7 @@ var (
 
 type decodedEvent struct {
 	isBlend      bool
+	eventName    string
 	activityType contracts.ActivityType
 	address      string
 	assetID      string
@@ -89,6 +90,7 @@ func decodeFixturePayload(raw []byte) decodedEvent {
 	asset := jsonString(v["asset"])
 	act := classifyEventName(evType)
 	return decodedEvent{
+		eventName:    strings.ToLower(strings.TrimSpace(evType)),
 		activityType: act,
 		address:      wallet,
 		assetID:      asset,
@@ -114,6 +116,21 @@ func decodeTopicJSON(topic string) decodedEvent {
 	}
 	wallet := ""
 	asset := ""
+	// Canonical Blend reserve events are [event, asset, actor]. The actor may
+	// itself be a Soroban contract, so type-based scanning alone cannot tell the
+	// two contract addresses apart.
+	if len(rawTopics) > 1 {
+		candidate := jsonString(rawTopics[1])
+		if validContractAddress(candidate) {
+			asset = candidate
+		}
+	}
+	if len(rawTopics) > 2 {
+		candidate := jsonString(rawTopics[2])
+		if validActorAddress(candidate) {
+			wallet = candidate
+		}
+	}
 	for _, val := range rawTopics {
 		s := jsonString(val)
 		if wallet == "" && validAccountAddress(s) {
@@ -145,12 +162,27 @@ func decodeTopicJSON(topic string) decodedEvent {
 			if asset == "" {
 				asset = dataAsset
 			}
-			if amount == "" {
-				amount = scValNumeric(data)
+			numbers := scValNumerics(data)
+			if amount == "" && len(numbers) > 0 {
+				amount = numbers[0]
+			}
+			share := ""
+			if len(numbers) > 1 {
+				share = numbers[1]
+			}
+			return decodedEvent{
+				eventName:    eventName,
+				activityType: act,
+				address:      wallet,
+				assetID:      asset,
+				amountRaw:    amount,
+				shareRaw:     share,
+				direction:    directionForActivity(act),
 			}
 		}
 	}
 	return decodedEvent{
+		eventName:    eventName,
 		activityType: act,
 		address:      wallet,
 		assetID:      asset,
@@ -171,6 +203,7 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	eventName := ""
 	wallet := ""
 	asset := ""
+	addresses := make([]string, 0, len(v0.Topics))
 	for _, topic := range v0.Topics {
 		if eventName == "" {
 			if symbol := scValSymbol(topic); symbol != "" {
@@ -179,14 +212,14 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 			}
 		}
 		if addr := scValAddress(topic); addr != "" {
-			if wallet == "" && validAccountAddress(addr) {
-				wallet = addr
-				continue
-			}
-			if asset == "" && validContractAddress(addr) {
-				asset = addr
-			}
+			addresses = append(addresses, addr)
 		}
+	}
+	if len(addresses) > 0 && validContractAddress(addresses[0]) {
+		asset = addresses[0]
+	}
+	if len(addresses) > 1 && validActorAddress(addresses[1]) {
+		wallet = addresses[1]
 	}
 	dataWallet, dataAsset := collectScValAddresses(v0.Data)
 	if wallet == "" {
@@ -199,11 +232,22 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	if act == "" {
 		return decodedEvent{}
 	}
+	numbers := scValNumerics(v0.Data)
+	amount := ""
+	share := ""
+	if len(numbers) > 0 {
+		amount = numbers[0]
+	}
+	if len(numbers) > 1 {
+		share = numbers[1]
+	}
 	return decodedEvent{
+		eventName:    strings.ToLower(strings.TrimSpace(eventName)),
 		activityType: act,
 		address:      wallet,
 		assetID:      asset,
-		amountRaw:    scValNumeric(v0.Data),
+		amountRaw:    amount,
+		shareRaw:     share,
 		direction:    directionForActivity(act),
 	}
 }
@@ -266,7 +310,11 @@ func directionForActivity(a contracts.ActivityType) string {
 // withdrawals move supply shares; borrows and repays move liability. Activities
 // whose share semantics are not determinable from the type alone (liquidation,
 // claim_rewards, status changes, etc.) return "" so the store can COALESCE.
-func shareTypeForActivity(a contracts.ActivityType) string {
+func shareTypeForEvent(eventName string, a contracts.ActivityType) string {
+	name := strings.ToLower(strings.TrimSpace(eventName))
+	if strings.Contains(name, "collateral") {
+		return string(contracts.PositionTypeCollateral)
+	}
 	switch a {
 	case contracts.ActivityTypeDeposit, contracts.ActivityTypeWithdraw:
 		return string(contracts.PositionTypeSupply)
@@ -399,7 +447,14 @@ func validContractAddress(address string) bool {
 	return strkey.IsValidContractAddress(address)
 }
 
+func validActorAddress(address string) bool {
+	return validAccountAddress(address) || validContractAddress(address)
+}
+
 func mergeDecoded(target *decodedEvent, src decodedEvent) {
+	if src.eventName != "" {
+		target.eventName = src.eventName
+	}
 	if src.activityType != "" {
 		target.activityType = src.activityType
 	}
@@ -523,6 +578,35 @@ func scValNumeric(val xdr.ScVal) string {
 		}
 	}
 	return ""
+}
+
+// scValNumerics returns scalar numeric values in wire order. Blend V2 activity
+// data is commonly [underlying_amount, reserve_share_amount]; preserving both
+// values avoids reconstructing shares with lossy, action-dependent rounding.
+func scValNumerics(val xdr.ScVal) []string {
+	switch val.Type {
+	case xdr.ScValTypeScvVec:
+		var out []string
+		if val.Vec != nil && *val.Vec != nil {
+			for _, item := range **val.Vec {
+				out = append(out, scValNumerics(item)...)
+			}
+		}
+		return out
+	case xdr.ScValTypeScvMap:
+		var out []string
+		if val.Map != nil && *val.Map != nil {
+			for _, entry := range **val.Map {
+				out = append(out, scValNumerics(entry.Val)...)
+			}
+		}
+		return out
+	default:
+		if n := scValNumeric(val); n != "" {
+			return []string{n}
+		}
+		return nil
+	}
 }
 
 func uint128ToString(val xdr.UInt128Parts) string {

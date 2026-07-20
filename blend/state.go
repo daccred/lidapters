@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/daccred/lidapters/bindings"
@@ -39,9 +40,15 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 // DecodeState path) falls back to each feed's newest round timestamp as the
 // reference "now", which prices the freshest round but cannot observe a feed
 // that stopped publishing.
+//
+// The fold itself is delegated to the strategy selected at New
+// (Config.StateMode): paranoid runs the reference reducer below verbatim;
+// incremental produces byte-identical output from a carried mirror. See
+// state_strategy.go for the two-mode contract.
 func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
-	next, _ := a.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, nil
+	next, _, dirty := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
+	a.lastDirty = dirty
+	return next, nil
 }
 
 // OwnsContract reports whether contractID belongs to Blend. Ownership is the
@@ -144,6 +151,24 @@ type blendStateBuilder struct {
 	// mistaken for a pool or a mock oracle.
 	ownedFeeds map[string]struct{}
 	deltas     []typedStateDelta
+	// dirtyUsers collects the identity of every user-positions entry apply
+	// touches (live write, archive, or explicit delete), keyed like pendingPos.
+	// Always allocated (both strategies populate it identically): the
+	// incremental strategy's snapshot also consults it to recompute exactly the
+	// touched users' cached position blocks instead of rebuilding all of them,
+	// and decodeBlendState/incrementalStrategy.decodeState both fold it (plus
+	// the pool-reserve-remap union, see markPoolRemapDirty) into the
+	// bindings.DirtyPosition set DecodeState/DecodeStateAt exposes via
+	// Adapter.LastDirtyPositions.
+	dirtyUsers map[string]userIdentity
+}
+
+// userIdentity is the (address, pool) pair behind a pendingPos composite key —
+// what the incremental strategy needs to maintain its sorted user order when
+// an entry is deleted and the pendingPos value is no longer there to consult.
+type userIdentity struct {
+	address string
+	pool    string
 }
 
 // oracleBuilder accumulates the parts of a Blend price oracle that a fold needs
@@ -181,6 +206,12 @@ type pendingUserPositions struct {
 	user         string
 	positions    xdr.ScVal
 	valueXDR     string
+	// archived / archivedLedgerSeq mirror contracts.PendingUserPosition.Archived
+	// / ArchivedLedgerSeq — see applyDelete's Positions case for how they're set
+	// (TTL lapse / eviction) and apply's Positions case for how a fresh live
+	// write clears them.
+	archived          bool
+	archivedLedgerSeq int64
 }
 
 type backstopPoolBalance struct {
@@ -207,14 +238,16 @@ func newBlendStateBuilder() *blendStateBuilder {
 		feeds:         map[string]*feedBuilder{},
 		aggregators:   map[string]*aggregatorBuilder{},
 		assets:        map[string]contracts.AssetMetadata{},
+		dirtyUsers:    map[string]userIdentity{},
 	}
 }
 
 // decodeBlendState is the pure-reducer core shared by DecodeState (which returns
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
-// built state plus the silver-debug deltas.
-func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta) {
+// built state, the silver-debug deltas, and the ledger's dirty-positions set
+// (see markPoolRemapDirty and bindings.DirtyPosition).
+func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	b.ownedAssets = a.assets
@@ -225,14 +258,114 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	for _, change := range changes {
 		b.apply(change, ledgerSeq)
 	}
+	// A reserve-index remap (or a pool appearing/disappearing) changes what
+	// every one of its pending users resolves to, even though their own
+	// Positions entry did not change this ledger — union them into the dirty
+	// set exactly as the incremental strategy's cache invalidation already
+	// must (state_incremental.go's snapshot), so the two strategies expose an
+	// identical dirty set regardless of which one is active.
+	markPoolRemapDirty(b.dirtyUsers, reserveIndexSnapshot(prior), b)
+	dirty := finalizeDirtyPositions(b.dirtyUsers, b.pendingPos)
 
 	// The deltas are appended from map-range iteration over the builder maps
 	// (appendPoolReserves / appendPoolUsers / appendBackstopUsersForPool), and Go
 	// map order is randomized, so two runs over the same ledgers would otherwise
 	// emit them in different orders. Sort by a stable total-order key before emit
 	// so the output is byte-identical run to run.
-	sort.SliceStable(b.deltas, func(i, j int) bool {
-		di, dj := b.deltas[i], b.deltas[j]
+	sortTypedStateDeltas(b.deltas)
+
+	return b.build(closeTime), b.deltas, dirty
+}
+
+// reserveIndexSnapshot derives each pool's reserveByIndex mapping (ReserveIndex
+// -> AssetID) as of a LedgerState, the same shape loadPrior would reconstruct.
+// nil (no prior) yields an empty snapshot: every pool the fold produces this
+// ledger is then "new", which is correct — a first-ledger pending entry can
+// only exist if it was also created this ledger, and that is already in
+// dirtyUsers directly.
+func reserveIndexSnapshot(state *bindings.LedgerState) map[string]map[int32]string {
+	if state == nil {
+		return nil
+	}
+	out := make(map[string]map[int32]string, len(state.Pools))
+	for _, pool := range state.Pools {
+		idx := make(map[int32]string, len(pool.Reserves))
+		for _, r := range pool.Reserves {
+			idx[r.ReserveIndex] = r.AssetID
+		}
+		out[pool.ContractID] = idx
+	}
+	return out
+}
+
+// markPoolRemapDirty unions into dirty every pendingPos entry belonging to a
+// pool whose reserveByIndex mapping changed this ledger — including a pool
+// that appeared or disappeared — between priorIndexes and the builder's
+// current pools. A remap invalidates every such user's resolved position
+// exactly as the incremental strategy's own cache does (state_incremental.go
+// tracks the identical comparison via its persistent s.poolIndexes).
+func markPoolRemapDirty(dirty map[string]userIdentity, priorIndexes map[string]map[int32]string, b *blendStateBuilder) {
+	if dirty == nil {
+		return
+	}
+	changed := map[string]struct{}{}
+	seen := make(map[string]struct{}, len(b.pools))
+	for id, pool := range b.pools {
+		seen[id] = struct{}{}
+		previous, tracked := priorIndexes[id]
+		if !tracked || !reserveIndexEqual(previous, pool.reserveByIndex) {
+			changed[id] = struct{}{}
+		}
+	}
+	for id := range priorIndexes {
+		if _, ok := seen[id]; !ok {
+			changed[id] = struct{}{}
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
+	for composite, pending := range b.pendingPos {
+		if _, ok := changed[pending.poolContract]; ok {
+			dirty[composite] = userIdentity{address: pending.user, pool: pending.poolContract}
+		}
+	}
+}
+
+// finalizeDirtyPositions turns the builder's raw dirty set into the exposed
+// bindings.DirtyPosition list, sorted by (address, pool) for byte-stable
+// output. Kind is derived post-hoc from whether the entry still has positions
+// after the fold (pendingPos presence) rather than tracked incrementally: a
+// key present in pendingPos is an Upsert (still has positions — including an
+// archived one, see Change 1), a key absent is a Removal (a genuine on-chain
+// delete purged it — TTL lapse/eviction never removes the pendingPos entry).
+func finalizeDirtyPositions(dirty map[string]userIdentity, pendingPos map[string]pendingUserPositions) []bindings.DirtyPosition {
+	if len(dirty) == 0 {
+		return nil
+	}
+	out := make([]bindings.DirtyPosition, 0, len(dirty))
+	for composite, identity := range dirty {
+		kind := bindings.DirtyRemoval
+		if _, ok := pendingPos[composite]; ok {
+			kind = bindings.DirtyUpsert
+		}
+		out = append(out, bindings.DirtyPosition{Address: identity.address, PoolContractID: identity.pool, Kind: kind})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		return out[i].PoolContractID < out[j].PoolContractID
+	})
+	return out
+}
+
+// sortTypedStateDeltas sorts the per-ledger silver-debug deltas by their stable
+// total-order key. Shared by both fold strategies so their delta streams stay
+// comparable entry for entry.
+func sortTypedStateDeltas(deltas []typedStateDelta) {
+	sort.SliceStable(deltas, func(i, j int) bool {
+		di, dj := deltas[i], deltas[j]
 		if di.EntityType != dj.EntityType {
 			return di.EntityType < dj.EntityType
 		}
@@ -247,8 +380,6 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 		}
 		return string(di.StateJSON) < string(dj.StateJSON)
 	})
-
-	return b.build(closeTime), b.deltas
 }
 
 // loadPrior reconstructs the mirror from the prior LedgerState so the reducer
@@ -282,10 +413,12 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 			continue
 		}
 		b.pendingPos[typedUserEntityKey(pending.Address, pending.PoolContractID)] = pendingUserPositions{
-			poolContract: pending.PoolContractID,
-			user:         pending.Address,
-			positions:    value,
-			valueXDR:     pending.PositionsXDR,
+			poolContract:      pending.PoolContractID,
+			user:              pending.Address,
+			positions:         value,
+			valueXDR:          pending.PositionsXDR,
+			archived:          pending.Archived,
+			archivedLedgerSeq: pending.ArchivedLedgerSeq,
 		}
 	}
 	for _, backstop := range prior.Backstops {
@@ -358,11 +491,7 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 	for _, p := range b.pendingPos {
 		// Raw blob round-trips regardless of whether the pool is known yet, so a
 		// position decoded before its pool appears is not lost.
-		pending = append(pending, contracts.PendingUserPosition{
-			Address:        p.user,
-			PoolContractID: p.poolContract,
-			PositionsXDR:   p.valueXDR,
-		})
+		pending = append(pending, pendingOut(p))
 		pool := b.pools[p.poolContract]
 		if pool == nil {
 			continue
@@ -574,7 +703,12 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			return
 		}
 		pool := ensurePool(b.pools, change.ContractID)
-		applyReserveConfig(ensureReserve(pool, asset), value)
+		reserve := ensureReserve(pool, asset)
+		applyReserveConfig(reserve, value)
+		// A live ResConfig write un-archives the reserve — see applyDelete's
+		// ResConfig/ResData case for how Archived gets set on TTL lapse/eviction.
+		reserve.state.Archived = false
+		reserve.state.ArchivedLedgerSeq = 0
 		finalizePoolReserves(pool)
 		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
 		b.appendPoolUsers(change.ContractID, ledgerSeq)
@@ -584,7 +718,10 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			return
 		}
 		pool := ensurePool(b.pools, change.ContractID)
-		applyReserveData(ensureReserve(pool, asset), value)
+		reserve := ensureReserve(pool, asset)
+		applyReserveData(reserve, value)
+		reserve.state.Archived = false
+		reserve.state.ArchivedLedgerSeq = 0
 		finalizePoolReserves(pool)
 		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
 	case "EmisConfig":
@@ -625,6 +762,9 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		}
 		pending := pendingUserPositions{poolContract: change.ContractID, user: user, positions: value, valueXDR: *change.ValueXDR}
 		b.pendingPos[typedUserEntityKey(user, change.ContractID)] = pending
+		if b.dirtyUsers != nil {
+			b.dirtyUsers[typedUserEntityKey(user, change.ContractID)] = userIdentity{address: user, pool: change.ContractID}
+		}
 		b.appendUserPositions(pending, ledgerSeq)
 	case "PoolBalance":
 		poolID, ok := variantAddress(args)
@@ -644,6 +784,23 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		b.backstopUsers[typedBackstopEntityKey(user, poolID)] = balance
 		b.addDelta(ledgerSeq, "backstop_position", typedBackstopEntityKey(user, poolID), true, b.backstopPosition(balance))
 	}
+}
+
+// isExplicitOnChainDelete reports whether a not-live change is a genuine
+// on-chain removal (the contract itself cleared the entry — CAP-23
+// LEDGER_ENTRY_REMOVED) rather than a TTL lapse or a CAP-0062 network-level
+// eviction. The relay extract (relay.lightgate.xyz/internal/relay/state)
+// threads the underlying xdr.LedgerEntryChangeType through as ChangeType via
+// its .String() form, so a real removal's value ends in "Removed"
+// (LedgerEntryChangeTypeLedgerEntryRemoved / test fixtures' short "Removed");
+// TTL lapse leaves ChangeType at whatever the entry's last live change was
+// (Created/Updated/Restored, forced not-live by Live/LiveUntilLedgerSeq
+// instead), and a synthesized eviction is tagged "evicted". Both of the
+// latter are restorable — the holder still owns the entry — so Change 1 (see
+// applyDelete's Positions and ResConfig/ResData cases) archives them instead
+// of purging. Only a genuine removal purges, matching prior behavior exactly.
+func isExplicitOnChainDelete(changeType string) bool {
+	return strings.HasSuffix(changeType, "Removed")
 }
 
 func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key xdr.ScVal, ledgerSeq int64) {
@@ -708,14 +865,41 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		if !ok {
 			return
 		}
-		if pool := b.pools[change.ContractID]; pool != nil {
+		pool := b.pools[change.ContractID]
+		if pool == nil {
+			return
+		}
+		if isExplicitOnChainDelete(change.ChangeType) {
 			delete(pool.reserves, asset)
 			// reserveByIndex is fully rebuilt below by finalizePoolReserves, so the
 			// reserve ordering stays index-stable (the prior code deleted index 0
 			// unconditionally here — a bug; dropped).
 			finalizePoolReserves(pool)
+			b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), false, nil)
+			b.appendPoolUsers(change.ContractID, ledgerSeq)
+			return
 		}
-		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), false, nil)
+		// TTL lapse or network eviction (not a real on-chain delete): archive
+		// rather than drop. Deleting the reserve here would erase its
+		// reserveByIndex slot and silently zero every holder's position in this
+		// asset (positionsFromMap resolves an index only through that map) —
+		// the exact bug this fixes. If the change still carries a value (TTL
+		// lapse: the entry's data survives, only its liveness lapsed) apply it
+		// first so the archived reserve reflects its last known state.
+		reserve := ensureReserve(pool, asset)
+		if change.ValueXDR != nil {
+			if value, ok := decodeScValBase64(*change.ValueXDR); ok {
+				if variant == "ResConfig" {
+					applyReserveConfig(reserve, value)
+				} else {
+					applyReserveData(reserve, value)
+				}
+			}
+		}
+		reserve.state.Archived = true
+		reserve.state.ArchivedLedgerSeq = ledgerSeq
+		finalizePoolReserves(pool)
+		b.addDelta(ledgerSeq, "reserve", typedReserveEntityKey(change.ContractID, asset), true, pool.reserves[asset].state)
 		b.appendPoolUsers(change.ContractID, ledgerSeq)
 	case "EmisConfig", "EmisData":
 		// Unlike ResConfig/ResData, losing an emission entry (TTL lapse or
@@ -751,8 +935,45 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		if !ok {
 			return
 		}
-		delete(b.pendingPos, typedUserEntityKey(user, change.ContractID))
-		b.addDelta(ledgerSeq, "user_positions", typedUserEntityKey(user, change.ContractID), false, nil)
+		entityKey := typedUserEntityKey(user, change.ContractID)
+		if b.dirtyUsers != nil {
+			b.dirtyUsers[entityKey] = userIdentity{address: user, pool: change.ContractID}
+		}
+		if isExplicitOnChainDelete(change.ChangeType) {
+			delete(b.pendingPos, entityKey)
+			b.addDelta(ledgerSeq, "user_positions", entityKey, false, nil)
+			return
+		}
+		// TTL lapse or network eviction (not a real on-chain delete): archive
+		// rather than purge. On mainnet this is the ≥321 dormant-but-live
+		// holders the old code silently dropped from Users/PendingUserPositions
+		// — their entry archived, still owned, restorable. If the change still
+		// carries a value (TTL lapse leaves ValueXDR populated; only eviction
+		// nils it) that is the last known blob and replaces the carried one;
+		// otherwise the prior blob is kept as-is.
+		existing, hadPrior := b.pendingPos[entityKey]
+		archived := pendingUserPositions{
+			poolContract:      change.ContractID,
+			user:              user,
+			archived:          true,
+			archivedLedgerSeq: ledgerSeq,
+		}
+		switch {
+		case change.ValueXDR != nil:
+			if value, ok := decodeScValBase64(*change.ValueXDR); ok {
+				archived.positions = value
+				archived.valueXDR = *change.ValueXDR
+			} else if hadPrior {
+				archived.positions, archived.valueXDR = existing.positions, existing.valueXDR
+			}
+		case hadPrior:
+			archived.positions, archived.valueXDR = existing.positions, existing.valueXDR
+		default:
+			// Nothing to archive: no prior entry and no value on this change.
+			return
+		}
+		b.pendingPos[entityKey] = archived
+		b.appendUserPositions(archived, ledgerSeq)
 	case "PoolBalance":
 		poolID, ok := variantAddress(args)
 		if !ok {
@@ -1365,12 +1586,10 @@ func isPositiveIntString(s string) bool {
 // reserves by (ReserveIndex, AssetID) so reserve ordering is index-stable and
 // identical run to run.
 func finalizePoolReserves(pool *poolBuilder) {
-	pool.reserveByIndex = map[int32]string{}
 	for assetID, reserve := range pool.reserves {
 		if reserve.state.AssetID == "" {
 			reserve.state.AssetID = assetID
 		}
-		pool.reserveByIndex[reserve.state.ReserveIndex] = assetID
 	}
 	reserves := make([]contracts.ReserveState, 0, len(pool.reserves))
 	for _, reserve := range pool.reserves {
@@ -1383,6 +1602,21 @@ func finalizePoolReserves(pool *poolBuilder) {
 		return reserves[i].AssetID < reserves[j].AssetID
 	})
 	pool.state.Reserves = reserves
+
+	// reserveByIndex is derived from the just-sorted slice, not a second raw
+	// range over pool.reserves: two reserves can share a ReserveIndex (e.g. one
+	// configured, one still at its zero-value default before ResConfig folds),
+	// and building the map straight from Go's randomized map iteration made the
+	// collision's winner nondeterministic run to run — harmless for output that
+	// never queries the colliding index, but it broke byte-for-byte
+	// reproducibility of reserveByIndex itself (surfaced by
+	// markPoolRemapDirty's prior-vs-current comparison flaking in the parity
+	// suite). Iterating the sorted slice instead makes the same asset win the
+	// collision every time: the highest AssetID for that index.
+	pool.reserveByIndex = map[int32]string{}
+	for _, reserve := range reserves {
+		pool.reserveByIndex[reserve.ReserveIndex] = reserve.AssetID
+	}
 }
 
 func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr.ScVal, kind contracts.PositionType) []contracts.UserReservePosition {
@@ -1405,10 +1639,12 @@ func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr
 			continue
 		}
 		pos := contracts.UserReservePosition{
-			Address:        pending.user,
-			PoolContractID: pending.poolContract,
-			AssetID:        assetID,
-			PositionType:   kind,
+			Address:           pending.user,
+			PoolContractID:    pending.poolContract,
+			AssetID:           assetID,
+			PositionType:      kind,
+			Archived:          pending.archived,
+			ArchivedLedgerSeq: pending.archivedLedgerSeq,
 		}
 		if kind == contracts.PositionTypeLiability {
 			pos.DTokensRaw = amount

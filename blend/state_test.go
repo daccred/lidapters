@@ -266,7 +266,7 @@ func TestDecodeState_DeltasSorted(t *testing.T) {
 	adapter := newTestAdapter(t)
 	changes := representativeChanges(t)
 
-	_, deltas := adapter.decodeBlendState(nil, changes, 123, time.Time{})
+	_, deltas, _ := adapter.decodeBlendState(nil, changes, 123, time.Time{})
 	if len(deltas) == 0 {
 		t.Fatal("expected deltas to be emitted")
 	}
@@ -468,6 +468,15 @@ func withLiveUntil(seq *uint32) changeOpt {
 
 func withChangeType(t string) changeOpt {
 	return func(c *bindings.ContractDataChange) { c.ChangeType = t }
+}
+
+// withNoValue clears ValueXDR — the shape a real explicit on-chain delete or
+// network eviction takes in the relay extract (contractDataChange only sets
+// ValueXDR when the underlying LedgerEntryChange is live; foldEvictedKeys
+// never sets it at all). A TTL lapse, by contrast, leaves ValueXDR populated
+// (only Live/LiveUntilLedgerSeq flip) — see isExplicitOnChainDelete's doc.
+func withNoValue() changeOpt {
+	return func(c *bindings.ContractDataChange) { c.ValueXDR = nil }
 }
 
 func stateChange(t *testing.T, contractID string, key, value xdr.ScVal, opts ...changeOpt) bindings.ContractDataChange {

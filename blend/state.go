@@ -1281,6 +1281,9 @@ func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
 	if dSupply, ok := fieldIntString(fields, "d_supply"); ok {
 		reserve.state.DSupplyRaw = dSupply
 	}
+	if backstopCredit, ok := fieldIntString(fields, "backstop_credit"); ok {
+		reserve.state.PoolBalanceRaw = backstopCredit
+	}
 }
 
 // applyReserveEmisConfig decodes one side's ReserveEmissionsConfig {expiration,

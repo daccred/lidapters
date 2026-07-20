@@ -40,10 +40,11 @@ func representativeChanges(t *testing.T) []bindings.ContractDataChange {
 			"enabled":    boolVal(true),
 		})),
 		stateChange(t, poolID, variantVal(t, "ResData", contractAddressVal(t, 2)), mapVal(t, map[string]xdr.ScVal{
-			"d_rate":   i128Val(1_000_000),
-			"b_rate":   i128Val(1_000_000),
-			"b_supply": i128Val(100),
-			"d_supply": i128Val(20),
+			"d_rate":          i128Val(1_000_000),
+			"b_rate":          i128Val(1_000_000),
+			"b_supply":        i128Val(100),
+			"d_supply":        i128Val(20),
+			"backstop_credit": i128Val(42),
 		})),
 		// res_token_id = reserve_index*2 + side; reserve index above is 1, so
 		// supply (side 1) = 3, borrow (side 0) = 2.
@@ -131,6 +132,9 @@ func TestApplyReserveConfig_DecodesEnabledAndReactivity(t *testing.T) {
 	}
 	if reserve.ReactivityRaw != "20000" {
 		t.Fatalf("expected reserve.ReactivityRaw=20000, got %q", reserve.ReactivityRaw)
+	}
+	if reserve.PoolBalanceRaw != "42" {
+		t.Fatalf("expected reserve.PoolBalanceRaw=42, got %q", reserve.PoolBalanceRaw)
 	}
 }
 

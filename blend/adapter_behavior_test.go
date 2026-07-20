@@ -48,6 +48,78 @@ func TestUnknownWasmHashIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestEmitTombstonesPartialCloseFullCloseAndReentry(t *testing.T) {
+	t.Parallel()
+
+	position := func(asset string, kind contracts.PositionType) bindings.Position {
+		return bindings.Position{
+			Address: "GACCOUNT", Protocol: "blend", ContractID: "CPOOL",
+			AssetID: asset, PositionType: kind,
+		}
+	}
+	prior := []bindings.Position{
+		position("CASSET1", contracts.PositionTypeSupply),
+		position("CASSET2", contracts.PositionTypeLiability),
+	}
+	priorSummary := []bindings.PositionSummary{{Address: "GACCOUNT", Protocol: "blend"}}
+
+	partial := &bindings.TransformOutput{Positions: []bindings.Position{prior[0]}}
+	emitTombstones(bindings.TransformInput{
+		LedgerSeq: 20, PriorPositions: prior, PriorSummaries: priorSummary,
+	}, partial)
+	if len(partial.PositionTombstones) != 1 || partial.PositionTombstones[0].AssetID != "CASSET2" {
+		t.Fatalf("partial close tombstones = %+v", partial.PositionTombstones)
+	}
+	if len(partial.SummaryTombstones) != 0 {
+		t.Fatalf("partial close must retain summary, got %+v", partial.SummaryTombstones)
+	}
+
+	closed := &bindings.TransformOutput{}
+	emitTombstones(bindings.TransformInput{
+		LedgerSeq: 21, PriorPositions: []bindings.Position{prior[0]}, PriorSummaries: priorSummary,
+	}, closed)
+	if len(closed.PositionTombstones) != 1 || closed.PositionTombstones[0].LedgerSeq != 21 {
+		t.Fatalf("full close position tombstones = %+v", closed.PositionTombstones)
+	}
+	if len(closed.SummaryTombstones) != 1 || closed.SummaryTombstones[0].LedgerSeq != 21 {
+		t.Fatalf("full close summary tombstones = %+v", closed.SummaryTombstones)
+	}
+
+	reentered := &bindings.TransformOutput{
+		Positions: []bindings.Position{prior[0]},
+		Summaries: priorSummary,
+	}
+	emitTombstones(bindings.TransformInput{
+		LedgerSeq: 22, PriorPositions: []bindings.Position{prior[0]}, PriorSummaries: priorSummary,
+	}, reentered)
+	if len(reentered.PositionTombstones) != 0 || len(reentered.SummaryTombstones) != 0 {
+		t.Fatalf("re-entry emitted tombstones: positions=%+v summaries=%+v", reentered.PositionTombstones, reentered.SummaryTombstones)
+	}
+}
+
+func TestEmitTombstonesDeterministicOrder(t *testing.T) {
+	t.Parallel()
+	prior := []bindings.Position{
+		{Address: "GB", Protocol: "blend", ContractID: "CP", AssetID: "CZ", PositionType: contracts.PositionTypeSupply},
+		{Address: "GA", Protocol: "blend", ContractID: "CP", AssetID: "CB", PositionType: contracts.PositionTypeSupply},
+		{Address: "GA", Protocol: "blend", ContractID: "CP", AssetID: "CA", PositionType: contracts.PositionTypeLiability},
+	}
+	out := &bindings.TransformOutput{}
+	emitTombstones(bindings.TransformInput{LedgerSeq: 30, PriorPositions: prior}, out)
+	if len(out.PositionTombstones) != 3 {
+		t.Fatalf("got %d tombstones", len(out.PositionTombstones))
+	}
+	got := []string{out.PositionTombstones[0].Address + out.PositionTombstones[0].AssetID,
+		out.PositionTombstones[1].Address + out.PositionTombstones[1].AssetID,
+		out.PositionTombstones[2].Address + out.PositionTombstones[2].AssetID}
+	want := []string{"GACA", "GACB", "GBCZ"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestUnknownEventShapeIsQuarantined(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +232,45 @@ func TestInvalidActivityAddressIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestContractActivityAddressIsAccepted(t *testing.T) {
+	t.Parallel()
+	adapter, err := New(DefaultConfig())
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"type": "supply", "wallet": validContractString(t, 80),
+		"asset": validContractString(t, 81), "amount": "1000", "share_amount": "900",
+	})
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: 123, CloseTime: time.Unix(10, 0).UTC(),
+		Events: []bindings.RawEventEnvelope{{
+			LedgerSeq: 123, TxHash: "tx-contract-actor", EventIndex: 0,
+			ContractID: validContractString(t, 82), Topic: "blend supply", RawEvent: raw,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Quarantine) != 0 || len(out.Activities) != 1 {
+		t.Fatalf("contract actor output: activities=%+v quarantine=%+v", out.Activities, out.Quarantine)
+	}
+}
+
+func TestTopicContractActorUsesThirdTopic(t *testing.T) {
+	t.Parallel()
+	asset := validContractString(t, 83)
+	actor := validContractString(t, 84)
+	topic, _ := json.Marshal(map[string]any{
+		"topics": []any{"supply", asset, actor},
+		"data":   []any{1000, 900},
+	})
+	decoded := decodeTopicJSON(string(topic))
+	if decoded.assetID != asset || decoded.address != actor || decoded.amountRaw != "1000" {
+		t.Fatalf("decoded contract actor event = %+v", decoded)
+	}
+}
+
 func TestInvalidActivityAssetIsQuarantined(t *testing.T) {
 	t.Parallel()
 
@@ -236,7 +347,7 @@ func TestInvalidActivityContractIsQuarantined(t *testing.T) {
 	}
 }
 
-func TestTopicDataXDRFragmentDoesNotBecomeAddress(t *testing.T) {
+func TestTopicContractActorNotOverwrittenByDataXDR(t *testing.T) {
 	t.Parallel()
 
 	adapter, err := New(DefaultConfig())
@@ -260,11 +371,11 @@ func TestTopicDataXDRFragmentDoesNotBecomeAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transform: %v", err)
 	}
-	if len(out.Activities) != 0 {
-		t.Fatalf("expected no activity from partial data_xdr address, got %+v", out.Activities)
+	if len(out.Activities) != 1 || out.Activities[0].Address != "CBUKYTAUPRPWZ76AENDIGCAYF2FUFKV37YZEPYJSYICMBPBPJBPKKZCR" {
+		t.Fatalf("expected canonical third-topic contract actor, got %+v", out.Activities)
 	}
-	if len(out.Quarantine) != 1 || out.Quarantine[0].Reason != "missing_activity_address" {
-		t.Fatalf("expected missing_activity_address quarantine, got %+v", out.Quarantine)
+	if len(out.Quarantine) != 0 {
+		t.Fatalf("unexpected quarantine for valid contract actor: %+v", out.Quarantine)
 	}
 }
 
@@ -428,7 +539,9 @@ func TestActivityShareTypeDerivedFromActivityType(t *testing.T) {
 		wantShare string
 	}{
 		{"supply", "supply"},
+		{"supply_collateral", "collateral"},
 		{"withdraw", "supply"},
+		{"withdraw_collateral", "collateral"},
 		{"borrow", "liability"},
 		{"repay", "liability"},
 	}
@@ -467,6 +580,34 @@ func TestActivityShareTypeDerivedFromActivityType(t *testing.T) {
 				t.Fatalf("expected share_type %q for %s, got %q", tc.wantShare, tc.event, out.Activities[0].ShareType)
 			}
 		})
+	}
+}
+
+func TestActivityDecodesUnderlyingAndShareAmounts(t *testing.T) {
+	t.Parallel()
+	adapter, err := New(DefaultConfig())
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	wallet := accountAddressVal(t, 7)
+	asset := contractAddressVal(t, 8)
+	raw := contractEventRaw(t,
+		[]xdr.ScVal{symbolVal(t, "supply_collateral"), asset, wallet},
+		vecVal(i128Val(1_000_000_000), i128Val(2_102_830_215)),
+	)
+	out, err := adapter.Transform(bindings.TransformInput{LedgerSeq: 124, Events: []bindings.RawEventEnvelope{{
+		LedgerSeq: 124, TxHash: "tx-shares", ContractID: validContractString(t, 49), RawEvent: raw,
+		Metadata: map[string]string{"protocol_id": "blend"},
+	}}})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Activities) != 1 {
+		t.Fatalf("expected one activity, got %d", len(out.Activities))
+	}
+	got := out.Activities[0]
+	if got.AmountRaw != "1000000000" || got.ShareAmount != "2102830215" || got.ShareType != "collateral" {
+		t.Fatalf("unexpected decoded activity: %+v", got)
 	}
 }
 

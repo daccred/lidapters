@@ -2,6 +2,7 @@ package blend
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/daccred/lidapters/bindings"
@@ -188,7 +189,7 @@ func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformO
 			AssetID:      decoded.assetID,
 			AmountRaw:    decoded.amountRaw,
 			ShareAmount:  decoded.shareRaw,
-			ShareType:    shareTypeForActivity(decoded.activityType),
+			ShareType:    shareTypeForEvent(decoded.eventName, decoded.activityType),
 			Direction:    decoded.direction,
 			Timestamp:    evt.CloseTime,
 			Metadata:     decoded.metadata,
@@ -198,6 +199,14 @@ func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformO
 	if err := a.computeState(input, out); err != nil {
 		return nil, err
 	}
+
+	// Emit tombstones for positions that disappeared since the prior ledger.
+	// The adapter is stateless across ledgers, so the relay passes the prior
+	// ledger's gold Position output via TransformInput.PriorPositions. Any
+	// position ID present in PriorPositions but absent from the current output
+	// is a leg that went to zero or was evicted — emit a tombstone so the relay
+	// can insert an is_deleted=TRUE row at this ledger.
+	emitTombstones(input, out)
 
 	return out, nil
 }
@@ -309,8 +318,94 @@ func activityIdentityFailure(decoded decodedEvent, evt bindings.RawEventEnvelope
 		}
 		return ""
 	}
-	if !strkey.IsValidEd25519PublicKey(decoded.address) {
+	// Soroban contracts can be Blend users (vaults/strategies routinely supply
+	// on behalf of themselves), so both account and contract StrKeys are valid
+	// activity actors.
+	if !strkey.IsValidEd25519PublicKey(decoded.address) && !strkey.IsValidContractAddress(decoded.address) {
 		return "invalid_activity_address"
 	}
 	return ""
+}
+
+// emitTombstones diffs the prior ledger's gold output against the current
+// output and emits PositionTombstones and SummaryTombstones for entities that
+// disappeared. A position leg disappears when it went to zero (the on-chain
+// blob still exists but the leg's amount reached zero and was filtered by
+// positionsFromMap) or when the entire Positions entry was evicted/removed
+// (applyDelete deleted the blob so build() no longer iterates it).
+//
+// The relay passes PriorPositions via TransformInput; we build a set of
+// current position IDs and any prior ID not in that set is a tombstone.
+//
+// Summary tombstones are emitted only when an address had a prior summary
+// and has no positions at all in the current output (fully closed).
+func emitTombstones(input bindings.TransformInput, out *bindings.TransformOutput) {
+	if len(input.PriorPositions) == 0 && len(input.PriorSummaries) == 0 {
+		return
+	}
+
+	// Build a set of current position identity keys: address|protocol|contract|asset|type
+	currentPosKeys := make(map[string]struct{}, len(out.Positions))
+	for _, p := range out.Positions {
+		key := positionIdentityKey(p.Address, p.Protocol, p.ContractID, p.AssetID, string(p.PositionType))
+		currentPosKeys[key] = struct{}{}
+	}
+
+	// Diff: any prior position ID not in current set → tombstone
+	for _, pp := range input.PriorPositions {
+		key := positionIdentityKey(pp.Address, pp.Protocol, pp.ContractID, pp.AssetID, string(pp.PositionType))
+		if _, exists := currentPosKeys[key]; !exists {
+			out.PositionTombstones = append(out.PositionTombstones, bindings.PositionTombstone{
+				Address:      pp.Address,
+				Protocol:     pp.Protocol,
+				ContractID:   pp.ContractID,
+				AssetID:      pp.AssetID,
+				PositionType: string(pp.PositionType),
+				LedgerSeq:    input.LedgerSeq,
+			})
+		}
+	}
+
+	// Sort tombstones for deterministic output
+	sort.Slice(out.PositionTombstones, func(i, j int) bool {
+		a, b := out.PositionTombstones[i], out.PositionTombstones[j]
+		return a.Address < b.Address ||
+			(a.Address == b.Address && a.ContractID < b.ContractID) ||
+			(a.Address == b.Address && a.ContractID == b.ContractID && a.AssetID < b.AssetID) ||
+			(a.Address == b.Address && a.ContractID == b.ContractID && a.AssetID == b.AssetID && a.PositionType < b.PositionType)
+	})
+
+	// Summary tombstones: an address has a prior summary but no positions now
+	if len(input.PriorSummaries) > 0 {
+		// Collect addresses that still have positions in the current output
+		addressesWithPositions := make(map[string]bool)
+		for _, p := range out.Positions {
+			addressesWithPositions[p.Address] = true
+		}
+
+		// Also check which addresses are in current summaries
+		currentSummaryAddrs := make(map[string]bool)
+		for _, s := range out.Summaries {
+			currentSummaryAddrs[s.Address] = true
+		}
+
+		for _, ps := range input.PriorSummaries {
+			if !addressesWithPositions[ps.Address] && !currentSummaryAddrs[ps.Address] {
+				out.SummaryTombstones = append(out.SummaryTombstones, bindings.SummaryTombstone{
+					Address:   ps.Address,
+					Protocol:  ps.Protocol,
+					LedgerSeq: input.LedgerSeq,
+				})
+			}
+		}
+
+		sort.Slice(out.SummaryTombstones, func(i, j int) bool {
+			a, b := out.SummaryTombstones[i], out.SummaryTombstones[j]
+			return a.Address < b.Address || (a.Address == b.Address && a.Protocol < b.Protocol)
+		})
+	}
+}
+
+func positionIdentityKey(address, protocol, contractID, assetID, posType string) string {
+	return address + "|" + protocol + "|" + contractID + "|" + assetID + "|" + posType
 }

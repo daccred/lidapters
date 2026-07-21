@@ -40,6 +40,39 @@ func TestTransformClassicComponentsDeterministic(t *testing.T) {
 	}
 }
 
+func TestTransformClosedClassicPositionEmitsTombstones(t *testing.T) {
+	a, err := NewWithConfig(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := bindings.AMMPoolState{Protocol: "aquarius", ContractID: "pool", PoolType: "volatile", TotalSharesRaw: "300", Tokens: []bindings.AMMTokenReserve{{AssetID: "a", ReserveRaw: "100"}, {AssetID: "b", ReserveRaw: "200"}}}
+	in := bindings.TransformInput{LedgerSeq: 9, CloseTime: time.Unix(9, 0).UTC(), State: &bindings.LedgerState{
+		AMMPools:     []bindings.AMMPoolState{pool},
+		AMMPositions: []bindings.AMMPositionState{{Address: "user", PoolContractID: "pool", SharesRaw: "0", HadShares: true}},
+	}}
+	out, err := a.Transform(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.AMMComponents) != 2 {
+		t.Fatalf("tombstone components %#v", out.AMMComponents)
+	}
+	for _, c := range out.AMMComponents {
+		if c.AmountRaw != "0" || c.ShareAmountRaw != "0" || c.Metadata["closed"] != "true" {
+			t.Fatalf("bad tombstone %#v", c)
+		}
+	}
+	// A zero-share position that never held shares must stay silent.
+	in.State.AMMPositions[0].HadShares = false
+	out, err = a.Transform(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.AMMComponents) != 0 {
+		t.Fatalf("never-held position emitted components: %#v", out.AMMComponents)
+	}
+}
+
 func TestUnknownWasmFailsClosed(t *testing.T) {
 	a, err := NewWithConfig(Config{PoolWasmHashes: map[string]string{"known": "stable"}})
 	if err != nil {

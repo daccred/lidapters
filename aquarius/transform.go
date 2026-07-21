@@ -51,11 +51,18 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 					out.Quarantine = append(out.Quarantine, bindings.QuarantineEvent{ID: stableID(group, t.AssetID, in.LedgerSeq), AdapterID: a.ID(), LedgerSeq: in.LedgerSeq, ContractID: pool.ContractID, Reason: "invalid_lp_share_state"})
 					continue
 				}
-				out.AMMComponents = append(out.AMMComponents, component(group, pos, a.cfg.Protocol, t.AssetID, "lp_principal", amount, pos.SharesRaw, nil, nil, in))
+				out.AMMComponents = append(out.AMMComponents, component(group, pos, a.cfg.Protocol, t.AssetID, "lp_principal", amount, pos.SharesRaw, nil, nil, in, false))
+			}
+		} else if pos.SharesRaw == "0" && pos.HadShares {
+			// Closed classic LP position: write explicit zero tombstones so the
+			// latest-per-id current view stops surfacing the pre-close rows.
+			// HadShares distinguishes a real close from a never-held position.
+			for _, t := range pool.Tokens {
+				out.AMMComponents = append(out.AMMComponents, component(group, pos, a.cfg.Protocol, t.AssetID, "lp_principal", "0", "0", nil, nil, in, true))
 			}
 		}
-		if pos.PendingRewardRaw != "" && pos.PendingRewardRaw != "0" {
-			out.AMMRewards = append(out.AMMRewards, bindings.AMMReward{ID: stableID(group, "aqua", pos.RewardTokenID), PositionGroupID: group, Address: pos.Address, Protocol: a.cfg.Protocol, PoolContractID: pos.PoolContractID, RewardTokenID: pos.RewardTokenID, RewardKind: "aqua", AmountRaw: pos.PendingRewardRaw, LedgerSeq: in.LedgerSeq, Timestamp: in.CloseTime, Metadata: map[string]string{"price_unavailable": "true"}})
+		if pending := pendingReward(pool, pos, in.CloseTime); pending != "" && pending != "0" {
+			out.AMMRewards = append(out.AMMRewards, bindings.AMMReward{ID: stableID(group, "aqua", pos.RewardTokenID), PositionGroupID: group, Address: pos.Address, Protocol: a.cfg.Protocol, PoolContractID: pos.PoolContractID, RewardTokenID: pos.RewardTokenID, RewardKind: "aqua", AmountRaw: pending, LedgerSeq: in.LedgerSeq, Timestamp: in.CloseTime, Metadata: map[string]string{"price_unavailable": "true"}})
 		}
 	}
 	txUsers := map[string]string{}
@@ -74,8 +81,12 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 	return out, nil
 }
 
-func component(group string, p bindings.AMMPositionState, protocol, asset, kind, amount, shares string, lower, upper *int32, in bindings.TransformInput) bindings.AMMPositionComponent {
-	return bindings.AMMPositionComponent{ID: stableID(group, kind, asset), PositionGroupID: group, Address: p.Address, Protocol: protocol, PoolContractID: p.PoolContractID, ComponentKind: kind, AssetID: asset, AmountRaw: amount, ShareAmountRaw: shares, TickLower: lower, TickUpper: upper, LedgerSeq: in.LedgerSeq, Timestamp: in.CloseTime, Metadata: map[string]string{"price_unavailable": "true", "apr_partial": "true"}}
+func component(group string, p bindings.AMMPositionState, protocol, asset, kind, amount, shares string, lower, upper *int32, in bindings.TransformInput, closed bool) bindings.AMMPositionComponent {
+	metadata := map[string]string{"price_unavailable": "true", "apr_partial": "true"}
+	if closed {
+		metadata["closed"] = "true"
+	}
+	return bindings.AMMPositionComponent{ID: stableID(group, kind, asset), PositionGroupID: group, Address: p.Address, Protocol: protocol, PoolContractID: p.PoolContractID, ComponentKind: kind, AssetID: asset, AmountRaw: amount, ShareAmountRaw: shares, TickLower: lower, TickUpper: upper, LedgerSeq: in.LedgerSeq, Timestamp: in.CloseTime, Metadata: metadata}
 }
 func appendRangeComponents(out *bindings.TransformOutput, group string, p bindings.AMMPositionState, pool bindings.AMMPoolState, in bindings.TransformInput) {
 	if len(pool.Tokens) < 2 {
@@ -89,12 +100,12 @@ func appendRangeComponents(out *bindings.TransformOutput, group string, p bindin
 	lo, hi := p.TickLower, p.TickUpper
 	for i, x := range []string{p.Principal0Raw, p.Principal1Raw} {
 		if x != "" && x != "0" {
-			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", x, p.LiquidityRaw, &lo, &hi, in))
+			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", x, p.LiquidityRaw, &lo, &hi, in, false))
 		}
 	}
 	for i, x := range []string{p.PendingFee0Raw, p.PendingFee1Raw} {
 		if x != "" && x != "0" {
-			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "unclaimed_fee", x, "", &lo, &hi, in))
+			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "unclaimed_fee", x, "", &lo, &hi, in, false))
 		}
 	}
 }

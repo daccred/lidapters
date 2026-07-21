@@ -25,6 +25,7 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 	for _, p := range next.AMMPositions {
 		positions[positionKey(p)] = p
 	}
+	a.applyPoolSeeds(pools, positions)
 	for _, c := range changes {
 		if !a.OwnsContract(c.ContractID) {
 			continue
@@ -62,14 +63,38 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 					switch strings.ToLower(symbolOrFirst(entry.Key)) {
 					case "pool_type", "type":
 						p.PoolType = strings.ToLower(symbolOrFirst(entry.Val))
+					case "router":
+						p.RouterContract = addr(entry.Val)
+					case "tokena":
+						upsertToken(&p.Tokens, 0, addr(entry.Val), "")
+					case "tokenb":
+						upsertToken(&p.Tokens, 1, addr(entry.Val), "")
+					case "reservea":
+						upsertToken(&p.Tokens, 0, "", firstUint(entry.Val))
+					case "reserveb":
+						upsertToken(&p.Tokens, 1, "", firstUint(entry.Val))
 					case "tokens":
 						p.Tokens = decodeReserves(p.Tokens, entry.Val)
 					case "reserves":
 						p.Tokens = decodeReserves(p.Tokens, entry.Val)
-					case "total_shares":
+					case "totalshares", "total_shares":
 						p.TotalSharesRaw = firstUint(entry.Val)
-					case "fee":
+					case "feefraction", "fee":
 						p.FeeFractionRaw = firstUint(entry.Val)
+					case "protocolfeefraction":
+						p.ProtocolFeeFractionRaw = firstUint(entry.Val)
+					case "poolrewardconfig":
+						f := fields(entry.Val)
+						p.RewardTpsRaw = firstUint(f["tps"])
+						p.RewardExpiredAtRaw = firstUint(f["expired_at"])
+					case "poolrewarddata":
+						f := fields(entry.Val)
+						p.RewardAccumulatedRaw = firstUint(f["accumulated"])
+						p.RewardLastTimeRaw = firstUint(f["last_time"])
+					case "workingsupply":
+						p.WorkingSupplyRaw = firstUint(entry.Val)
+					case "rewardtoken":
+						p.RewardTokenID = addr(entry.Val)
 					case "a":
 						p.AmplificationRaw = firstUint(entry.Val)
 					case "slot0":
@@ -89,15 +114,56 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			decodeSlot0(&p, val)
 		case "active_liquidity":
 			p.ActiveLiquidityRaw = firstUint(val)
-		case "position", "positions", "balance":
+		case "position", "positions", "balance", "workingbalance":
 			if pos, ok := decodePosition(c.ContractID, key, val); ok {
-				positions[positionKey(pos)] = pos
+				current := positions[positionKey(pos)]
+				if current.Address == "" {
+					current = pos
+				} else {
+					current.SharesRaw = pos.SharesRaw
+					current.LiquidityRaw = pos.LiquidityRaw
+					current.SqrtPriceLowerX96 = pos.SqrtPriceLowerX96
+					current.SqrtPriceUpperX96 = pos.SqrtPriceUpperX96
+					current.TickLower = pos.TickLower
+					current.TickUpper = pos.TickUpper
+					current.PendingFee0Raw = pos.PendingFee0Raw
+					current.PendingFee1Raw = pos.PendingFee1Raw
+				}
+				if name == "workingbalance" && pos.SharesRaw != "" {
+					// The WorkingBalance entry value is the checkpointed reward
+					// weight itself, decoded by decodePosition as a plain uint.
+					current.WorkingBalanceRaw = pos.SharesRaw
+				}
+				if current.SharesRaw != "" && current.SharesRaw != "0" {
+					current.HadShares = true
+				}
+				positions[positionKey(current)] = current
+			}
+		case "userrewarddata":
+			if pos, ok := decodeRewardPosition(c.ContractID, key, val); ok {
+				current := positions[positionKey(pos)]
+				if current.Address == "" {
+					current = pos
+				}
+				current.PendingRewardRaw = pos.PendingRewardRaw
+				current.RewardPoolAccumulatedRaw = pos.RewardPoolAccumulatedRaw
+				positions[positionKey(current)] = current
 			}
 		default:
 			if user := addr(key); user != "" {
 				if shares := firstUint(val); shares != "" {
 					pos := bindings.AMMPositionState{Address: user, PoolContractID: c.ContractID, SharesRaw: shares}
-					positions[positionKey(pos)] = pos
+					key := positionKey(pos)
+					if current, ok := positions[key]; ok {
+						pos.HadShares = current.HadShares
+						if pos.PendingRewardRaw == "" {
+							pos.PendingRewardRaw = current.PendingRewardRaw
+						}
+					}
+					if pos.SharesRaw != "0" {
+						pos.HadShares = true
+					}
+					positions[key] = pos
 				}
 			}
 		}
@@ -110,6 +176,9 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			} else if !a.cfg.AllowUnknownWasm {
 				continue
 			}
+		}
+		if p.PoolType == "" && len(p.Tokens) == 2 && p.Tokens[0].ReserveRaw != "" && p.Tokens[1].ReserveRaw != "" {
+			p.PoolType = "volatile"
 		}
 		if p.PoolType != "" || len(p.Tokens) > 0 {
 			pools[c.ContractID] = p
@@ -126,6 +195,78 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 	}
 	sort.Slice(next.AMMPositions, func(i, j int) bool { return positionKey(next.AMMPositions[i]) < positionKey(next.AMMPositions[j]) })
 	return next, nil
+}
+
+// applyPoolSeeds folds each configured pool seed into the working maps as a
+// gap-fill floor: a pool/position absent from state (its instance entry
+// predates the folded window) is inserted from the seed, and individual empty
+// fields on a present pool are filled from the seed. Values the fold already
+// observed from the chain are never overridden. Runs before each ledger's
+// change loop, so chain writes in-window always supersede the seed.
+func (a *Adapter) applyPoolSeeds(pools map[string]bindings.AMMPoolState, positions map[string]bindings.AMMPositionState) {
+	for _, seed := range a.cfg.PoolSeeds {
+		if strings.TrimSpace(seed.ContractID) == "" {
+			continue
+		}
+		p, ok := pools[seed.ContractID]
+		if !ok {
+			p = bindings.AMMPoolState{Protocol: a.cfg.Protocol, ContractID: seed.ContractID}
+		}
+		if p.Protocol == "" {
+			p.Protocol = a.cfg.Protocol
+		}
+		if p.RouterContract == "" {
+			p.RouterContract = seed.RouterContract
+		}
+		if p.PoolHash == "" {
+			p.PoolHash = seed.PoolHash
+		}
+		if p.PoolType == "" {
+			p.PoolType = seed.PoolType
+		}
+		for i, id := range seed.Tokens {
+			if id == "" {
+				continue
+			}
+			upsertToken(&p.Tokens, i, id, "")
+		}
+		for i, r := range seed.ReservesRaw {
+			if r == "" {
+				continue
+			}
+			if i < len(p.Tokens) && p.Tokens[i].ReserveRaw == "" {
+				upsertToken(&p.Tokens, i, "", r)
+			}
+		}
+		if p.TotalSharesRaw == "" {
+			p.TotalSharesRaw = seed.TotalSharesRaw
+		}
+		if p.FeeFractionRaw == "" {
+			p.FeeFractionRaw = seed.FeeFractionRaw
+		}
+		if p.ProtocolFeeFractionRaw == "" {
+			p.ProtocolFeeFractionRaw = seed.ProtocolFeeFractionRaw
+		}
+		pools[seed.ContractID] = p
+		for _, sp := range seed.Positions {
+			if strings.TrimSpace(sp.Address) == "" {
+				continue
+			}
+			pos := bindings.AMMPositionState{Address: sp.Address, PoolContractID: seed.ContractID}
+			key := positionKey(pos)
+			current, ok := positions[key]
+			if !ok {
+				current = pos
+			}
+			if current.SharesRaw == "" {
+				current.SharesRaw = sp.SharesRaw
+			}
+			if current.PendingRewardRaw == "" {
+				current.PendingRewardRaw = sp.PendingRewardRaw
+			}
+			positions[key] = current
+		}
+	}
 }
 
 func cloneState(s *bindings.LedgerState) *bindings.LedgerState {
@@ -182,6 +323,9 @@ func firstUint(v xdr.ScVal) string {
 	}
 	if u, ok := v.GetU64(); ok {
 		return fmt.Sprint(uint64(u))
+	}
+	if u, ok := v.GetU32(); ok {
+		return fmt.Sprint(uint32(u))
 	}
 	if i, ok := v.GetI64(); ok {
 		return fmt.Sprint(int64(i))
@@ -264,6 +408,17 @@ func decodeReserves(old []bindings.AMMTokenReserve, v xdr.ScVal) []bindings.AMMT
 	}
 	return out
 }
+func upsertToken(tokens *[]bindings.AMMTokenReserve, idx int, assetID, reserve string) {
+	for len(*tokens) <= idx {
+		*tokens = append(*tokens, bindings.AMMTokenReserve{})
+	}
+	if assetID != "" {
+		(*tokens)[idx].AssetID = assetID
+	}
+	if reserve != "" {
+		(*tokens)[idx].ReserveRaw = reserve
+	}
+}
 func decodeSlot0(p *bindings.AMMPoolState, v xdr.ScVal) {
 	f := fields(v)
 	p.SqrtPriceX96 = firstUint(f["sqrt_price_x96"])
@@ -281,6 +436,9 @@ func decodePosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState,
 	}
 	f := fields(val)
 	p.SharesRaw = firstUint(f["shares"])
+	if p.SharesRaw == "" {
+		p.SharesRaw = firstUint(val)
+	}
 	p.LiquidityRaw = firstUint(f["liquidity"])
 	p.SqrtPriceLowerX96 = firstUint(f["sqrt_price_lower_x96"])
 	p.SqrtPriceUpperX96 = firstUint(f["sqrt_price_upper_x96"])
@@ -288,6 +446,20 @@ func decodePosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState,
 	fmt.Sscan(firstUint(f["tick_upper"]), &p.TickUpper)
 	p.PendingFee0Raw = firstUint(f["tokens_owed_0"])
 	p.PendingFee1Raw = firstUint(f["tokens_owed_1"])
+	return p, p.Address != ""
+}
+func decodeRewardPosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState, bool) {
+	p := bindings.AMMPositionState{PoolContractID: pool}
+	if vec, ok := key.GetVec(); ok && vec != nil {
+		for _, x := range *vec {
+			if a := addr(x); strings.HasPrefix(a, "G") {
+				p.Address = a
+			}
+		}
+	}
+	f := fields(val)
+	p.PendingRewardRaw = firstUint(f["to_claim"])
+	p.RewardPoolAccumulatedRaw = firstUint(f["pool_accumulated"])
 	return p, p.Address != ""
 }
 func assetMetadata(id string, key, val xdr.ScVal) (bindings.AMMAssetMetadata, bool) {

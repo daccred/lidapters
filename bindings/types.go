@@ -108,6 +108,18 @@ type AMMPoolState struct {
 	ActiveLiquidityRaw     string
 	FeeGrowthGlobal0X128   string
 	FeeGrowthGlobal1X128   string
+	// Aquarius checkpointed AQUA rewards (PoolRewardConfig/PoolRewardData and
+	// WorkingSupply instance keys). RewardTpsRaw is the emission rate per
+	// second; RewardAccumulatedRaw is the pool's cumulative accrued reward
+	// total at RewardLastTimeRaw; accrual between checkpoints advances it by
+	// tps * elapsed, capped at RewardExpiredAtRaw. WorkingSupplyRaw is the
+	// pool's total reward weight (sum of working balances).
+	RewardTpsRaw         string
+	RewardExpiredAtRaw   string
+	RewardAccumulatedRaw string
+	RewardLastTimeRaw    string
+	WorkingSupplyRaw     string
+	RewardTokenID        string
 }
 
 type AMMPositionState struct {
@@ -127,6 +139,22 @@ type AMMPositionState struct {
 	PendingRewardRaw         string
 	WeightedLiquidityRaw     string
 	RewardCheckpointEligible bool
+	// HadShares is sticky lifecycle state: it flips true the first time the
+	// fold observes a nonzero share balance for this position and never flips
+	// back. It distinguishes "position that closed" (HadShares && shares==0,
+	// which deserves component tombstones) from "position that never existed"
+	// (shares==0 without HadShares, which must stay silent).
+	HadShares bool
+	// WorkingBalanceRaw is the pool's checkpointed reward weight for this user
+	// (the Aquarius WorkingBalance entry). It is NOT necessarily the raw share
+	// count: ICE boost scales it within [0.4x, 1.0x] of the deposit. Reward
+	// accrual uses this weight; LP principal decomposition uses SharesRaw.
+	WorkingBalanceRaw string
+	// RewardPoolAccumulatedRaw is the user checkpoint's copy of the pool's
+	// accumulated reward total (UserRewardData.pool_accumulated) — the point
+	// from which the user's unclaimed accrual is measured. PendingRewardRaw
+	// is the checkpointed to_claim from the same entry.
+	RewardPoolAccumulatedRaw string
 }
 
 // ContractDataChange is the shared vocabulary between the relay's

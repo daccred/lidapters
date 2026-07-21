@@ -14,6 +14,35 @@ type Config struct {
 	Routers          map[string]struct{}
 	PoolWasmHashes   map[string]string // hash -> pool type
 	AllowUnknownWasm bool
+	PoolSeeds        []PoolSeed
+}
+
+// PoolSeedPosition is one wallet's known position at the seed ledger.
+type PoolSeedPosition struct {
+	Address          string
+	SharesRaw        string
+	PendingRewardRaw string
+}
+
+// PoolSeed is a curated, operator-supplied snapshot of one pool's state at a
+// known ledger (e.g. the harness's frozen baseline-state.json). Raw-meta
+// folding can only reconstruct pool state for entries WRITTEN inside the
+// folded window; a pool whose instance entry predates the window would
+// otherwise fold to nothing. The seed acts as a gap-fill floor in DecodeState:
+// it only fills fields the fold has not observed, and never overrides values
+// decoded from the chain. Seeds are config (fingerprinted), so changing them
+// invalidates fold checkpoints by construction.
+type PoolSeed struct {
+	ContractID             string
+	RouterContract         string
+	PoolHash               string
+	PoolType               string
+	Tokens                 []string // asset IDs, token-index order
+	ReservesRaw            []string // same order as Tokens
+	TotalSharesRaw         string
+	FeeFractionRaw         string
+	ProtocolFeeFractionRaw string
+	Positions              []PoolSeedPosition
 }
 
 func DefaultConfig() Config { return Config{AdapterID: "aquarius", Protocol: "aquarius"} }
@@ -47,6 +76,7 @@ func NewWithConfig(config Config) (*Adapter, error) {
 		for k, v := range c.PoolWasmHashes {
 			cfg.PoolWasmHashes[strings.ToLower(k)] = v
 		}
+		cfg.PoolSeeds = append(cfg.PoolSeeds, c.PoolSeeds...)
 	}
 	if cfg.AdapterID == "" || cfg.Protocol == "" {
 		return nil, fmt.Errorf("aquarius: adapter id and protocol are required")

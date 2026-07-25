@@ -190,6 +190,7 @@ func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformO
 			AmountRaw:    decoded.amountRaw,
 			ShareAmount:  decoded.shareRaw,
 			ShareType:    shareTypeForEvent(decoded.eventName, decoded.activityType),
+			Counterparty: decoded.counterparty,
 			Direction:    decoded.direction,
 			Timestamp:    evt.CloseTime,
 			Metadata:     decoded.metadata,

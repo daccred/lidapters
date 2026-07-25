@@ -132,10 +132,23 @@ type blendStateBuilder struct {
 	pendingPos    map[string]pendingUserPositions
 	backstopPools map[string]backstopPoolBalance
 	backstopUsers map[string]backstopUserBalance
-	oracles       map[string]*oracleBuilder
-	feeds         map[string]*feedBuilder
-	aggregators   map[string]*aggregatorBuilder
-	assets        map[string]contracts.AssetMetadata
+	// backstopEmis holds each pool's BEmisData entry from the backstop contract,
+	// keyed by pool contract ID. Kept beside backstopPools (not merged into it)
+	// so a PoolBalance write can never clobber emission fields and vice versa;
+	// merged onto PoolState at build time and reconstructed from it on reload,
+	// the same round-trip rule as backstopPools.
+	backstopEmis map[string]backstopEmisData
+	// auctions holds each live Auction(AuctionKey) entry, keyed by
+	// typedAuctionEntityKey(pool, user, auctType). Temporary storage on-chain:
+	// any not-live change removes the entry.
+	auctions map[string]contracts.AuctionState
+	// userEmis holds each UserEmis(UserReserveKey) entry, keyed by
+	// typedUserEmisEntityKey(user, pool, resTokenID).
+	userEmis    map[string]contracts.UserEmissionState
+	oracles     map[string]*oracleBuilder
+	feeds       map[string]*feedBuilder
+	aggregators map[string]*aggregatorBuilder
+	assets      map[string]contracts.AssetMetadata
 	// owned is the adapter's owned-contract set, threaded in so the reducer can
 	// tell an oracle's contract_data apart from a pool's. It is read-only config,
 	// not per-ledger scratch, so it does not break the run-twice purity guarantee.
@@ -226,6 +239,26 @@ type backstopUserBalance struct {
 	user         string
 	sharesRaw    string
 	q4w          []contracts.Q4WEntry
+	// emisIndexRaw / emisAccruedRaw mirror the backstop's UEmisData(pool, user)
+	// entry — a SIBLING of the UserBalance entry, so either can exist without
+	// the other and neither's write/delete may clobber the other's fields.
+	emisIndexRaw   string
+	emisAccruedRaw string
+}
+
+// backstopEmisData mirrors the backstop's BEmisData(pool) entry
+// (BackstopEmissionData {expiration, eps, index, last_time}); every field is
+// independently optional-on-chain and stays "" when absent.
+type backstopEmisData struct {
+	poolContract  string
+	epsRaw        string
+	expirationRaw string
+	indexRaw      string
+	lastTimeRaw   string
+}
+
+func (d backstopEmisData) empty() bool {
+	return d.epsRaw == "" && d.expirationRaw == "" && d.indexRaw == "" && d.lastTimeRaw == ""
 }
 
 func newBlendStateBuilder() *blendStateBuilder {
@@ -234,6 +267,9 @@ func newBlendStateBuilder() *blendStateBuilder {
 		pendingPos:    map[string]pendingUserPositions{},
 		backstopPools: map[string]backstopPoolBalance{},
 		backstopUsers: map[string]backstopUserBalance{},
+		backstopEmis:  map[string]backstopEmisData{},
+		auctions:      map[string]contracts.AuctionState{},
+		userEmis:      map[string]contracts.UserEmissionState{},
 		oracles:       map[string]*oracleBuilder{},
 		feeds:         map[string]*feedBuilder{},
 		aggregators:   map[string]*aggregatorBuilder{},
@@ -406,6 +442,28 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 				q4wRaw:       pool.BackstopQ4WSharesRaw,
 			}
 		}
+		// Backstop pool-level emission accrual round-trips on the pool the same
+		// way the balance does — restored whenever any field is present.
+		emis := backstopEmisData{
+			poolContract:  pool.ContractID,
+			epsRaw:        pool.BackstopEmisEPSRaw,
+			expirationRaw: pool.BackstopEmisExpirationRaw,
+			indexRaw:      pool.BackstopEmisIndexRaw,
+			lastTimeRaw:   pool.BackstopEmisLastTimeRaw,
+		}
+		if !emis.empty() {
+			b.backstopEmis[pool.ContractID] = emis
+		}
+	}
+	for _, auction := range prior.Auctions {
+		// A live auction only appears in the ledger it changes; restore it so a
+		// later ledger still knows about it. Removed on the not-live change.
+		b.auctions[typedAuctionEntityKey(auction.PoolContractID, auction.UserAddress, auction.AuctionType)] = auction
+	}
+	for _, emission := range prior.UserEmissions {
+		// Same carry requirement as auctions: the entry is only written when the
+		// user's accrual checkpoints.
+		b.userEmis[typedUserEmisEntityKey(emission.Address, emission.PoolContractID, emission.ReserveTokenID)] = emission
 	}
 	for _, pending := range prior.PendingUserPositions {
 		value, ok := decodeScValBase64(pending.PositionsXDR)
@@ -423,10 +481,12 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 	}
 	for _, backstop := range prior.Backstops {
 		b.backstopUsers[typedBackstopEntityKey(backstop.Address, backstop.PoolContractID)] = backstopUserBalance{
-			poolContract: backstop.PoolContractID,
-			user:         backstop.Address,
-			sharesRaw:    backstop.UserSharesRaw,
-			q4w:          backstop.Q4W,
+			poolContract:   backstop.PoolContractID,
+			user:           backstop.Address,
+			sharesRaw:      backstop.UserSharesRaw,
+			q4w:            backstop.Q4W,
+			emisIndexRaw:   backstop.EmisIndexRaw,
+			emisAccruedRaw: backstop.UnclaimedEmissionsRaw,
 		}
 	}
 	for _, oracle := range prior.Oracles {
@@ -486,6 +546,7 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 			pool.state.BackstopTokensRaw = balance.tokensRaw
 			pool.state.BackstopQ4WSharesRaw = balance.q4wRaw
 		}
+		mergeBackstopEmis(pool, b.backstopEmis)
 		pools = append(pools, pool.state)
 	}
 	for _, p := range b.pendingPos {
@@ -520,7 +581,66 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 		PriceFeeds:           b.buildPriceFeeds(),
 		OracleAggregators:    b.buildOracleAggregators(),
 		Assets:               b.buildAssets(),
+		Auctions:             b.buildAuctions(),
+		UserEmissions:        b.buildUserEmissions(),
 	}
+}
+
+// mergeBackstopEmis threads a pool's carried BEmisData onto its PoolState —
+// the emission twin of the backstopPools merge above it in build/snapshot.
+// When no entry is carried the fields are cleared, so a deleted BEmisData
+// entry cannot linger on the pool from a prior ledger's merge.
+func mergeBackstopEmis(pool *poolBuilder, backstopEmis map[string]backstopEmisData) {
+	emis := backstopEmis[pool.state.ContractID]
+	pool.state.BackstopEmisEPSRaw = emis.epsRaw
+	pool.state.BackstopEmisExpirationRaw = emis.expirationRaw
+	pool.state.BackstopEmisIndexRaw = emis.indexRaw
+	pool.state.BackstopEmisLastTimeRaw = emis.lastTimeRaw
+}
+
+// buildAuctions snapshots the carried auction entries, sorted by
+// (pool, user, type) so the run-twice output stays byte-identical.
+func (b *blendStateBuilder) buildAuctions() []contracts.AuctionState {
+	if len(b.auctions) == 0 {
+		return nil
+	}
+	auctions := make([]contracts.AuctionState, 0, len(b.auctions))
+	for _, auction := range b.auctions {
+		auctions = append(auctions, auction)
+	}
+	sort.Slice(auctions, func(i, j int) bool {
+		if auctions[i].PoolContractID != auctions[j].PoolContractID {
+			return auctions[i].PoolContractID < auctions[j].PoolContractID
+		}
+		if auctions[i].UserAddress != auctions[j].UserAddress {
+			return auctions[i].UserAddress < auctions[j].UserAddress
+		}
+		return auctions[i].AuctionType < auctions[j].AuctionType
+	})
+	return auctions
+}
+
+// buildUserEmissions snapshots the carried per-user emission entries, sorted
+// by (address, pool, reserve token) so the run-twice output stays
+// byte-identical.
+func (b *blendStateBuilder) buildUserEmissions() []contracts.UserEmissionState {
+	if len(b.userEmis) == 0 {
+		return nil
+	}
+	emissions := make([]contracts.UserEmissionState, 0, len(b.userEmis))
+	for _, emission := range b.userEmis {
+		emissions = append(emissions, emission)
+	}
+	sort.Slice(emissions, func(i, j int) bool {
+		if emissions[i].Address != emissions[j].Address {
+			return emissions[i].Address < emissions[j].Address
+		}
+		if emissions[i].PoolContractID != emissions[j].PoolContractID {
+			return emissions[i].PoolContractID < emissions[j].PoolContractID
+		}
+		return emissions[i].ReserveTokenID < emissions[j].ReserveTokenID
+	})
+	return emissions
 }
 
 // buildAssets snapshots each registered asset contract's carried decode state
@@ -781,8 +901,82 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			return
 		}
 		balance := decodeBackstopUserBalance(poolID, user, value)
+		// UEmisData is a sibling entry — a UserBalance write must not clobber
+		// carried emission fields.
+		if existing, ok := b.backstopUsers[typedBackstopEntityKey(user, poolID)]; ok {
+			balance.emisIndexRaw = existing.emisIndexRaw
+			balance.emisAccruedRaw = existing.emisAccruedRaw
+		}
 		b.backstopUsers[typedBackstopEntityKey(user, poolID)] = balance
 		b.addDelta(ledgerSeq, "backstop_position", typedBackstopEntityKey(user, poolID), true, b.backstopPosition(balance))
+	case "BEmisData":
+		poolID, ok := variantAddress(args)
+		if !ok {
+			return
+		}
+		emis, ok := decodeBackstopEmisData(poolID, value)
+		if !ok {
+			// Malformed live write: keep whatever was carried rather than
+			// half-clearing it — absent decode is a skip, never a wipe.
+			return
+		}
+		b.backstopEmis[poolID] = emis
+		b.addDelta(ledgerSeq, "backstop_emission", poolID, true, typedBackstopEmis(emis))
+	case "UEmisData":
+		poolID, user, ok := backstopPoolUser(args)
+		if !ok {
+			return
+		}
+		indexRaw, accruedRaw, ok := decodeUserEmissionData(value)
+		if !ok {
+			return
+		}
+		entityKey := typedBackstopEntityKey(user, poolID)
+		balance, exists := b.backstopUsers[entityKey]
+		if !exists {
+			// Accrual can outlive (or precede) a UserBalance entry — carry it on
+			// an otherwise-empty balance row rather than dropping it.
+			balance = backstopUserBalance{poolContract: poolID, user: user}
+		}
+		balance.emisIndexRaw = indexRaw
+		balance.emisAccruedRaw = accruedRaw
+		b.backstopUsers[entityKey] = balance
+		b.addDelta(ledgerSeq, "backstop_position", entityKey, true, b.backstopPosition(balance))
+	case "Auction":
+		user, auctType, ok := auctionKeyParts(args)
+		if !ok {
+			return
+		}
+		auction, ok := decodeAuctionState(change.ContractID, user, auctType, value)
+		if !ok {
+			// Malformed AuctionData (missing block, non-map lot/bid, undecodable
+			// entry): skip the write entirely — a partial auction would
+			// under-report a liquidation's lot or bid, which is worse than
+			// keeping the carried state absent/stale until the next good write.
+			return
+		}
+		entityKey := typedAuctionEntityKey(change.ContractID, user, auctType)
+		b.auctions[entityKey] = auction
+		b.addDelta(ledgerSeq, "auction", entityKey, true, auction)
+	case "UserEmis":
+		user, resTokenID, ok := userReserveKeyParts(args)
+		if !ok {
+			return
+		}
+		indexRaw, accruedRaw, ok := decodeUserEmissionData(value)
+		if !ok {
+			return
+		}
+		emission := contracts.UserEmissionState{
+			Address:        user,
+			PoolContractID: change.ContractID,
+			ReserveTokenID: resTokenID,
+			IndexRaw:       indexRaw,
+			AccruedRaw:     accruedRaw,
+		}
+		entityKey := typedUserEmisEntityKey(user, change.ContractID, resTokenID)
+		b.userEmis[entityKey] = emission
+		b.addDelta(ledgerSeq, "user_emission", entityKey, true, emission)
 	}
 }
 
@@ -987,8 +1181,67 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		if !ok {
 			return
 		}
-		delete(b.backstopUsers, typedBackstopEntityKey(user, poolID))
-		b.addDelta(ledgerSeq, "backstop_position", typedBackstopEntityKey(user, poolID), false, nil)
+		entityKey := typedBackstopEntityKey(user, poolID)
+		// The sibling UEmisData entry survives a UserBalance delete on-chain
+		// (accrued-but-unclaimed emissions persist after a full withdrawal), so
+		// only the balance half is cleared; the row is dropped when nothing
+		// remains.
+		if balance, exists := b.backstopUsers[entityKey]; exists && (balance.emisIndexRaw != "" || balance.emisAccruedRaw != "") {
+			balance.sharesRaw = ""
+			balance.q4w = nil
+			b.backstopUsers[entityKey] = balance
+			b.addDelta(ledgerSeq, "backstop_position", entityKey, true, b.backstopPosition(balance))
+			return
+		}
+		delete(b.backstopUsers, entityKey)
+		b.addDelta(ledgerSeq, "backstop_position", entityKey, false, nil)
+	case "BEmisData":
+		poolID, ok := variantAddress(args)
+		if !ok {
+			return
+		}
+		delete(b.backstopEmis, poolID)
+		b.addDelta(ledgerSeq, "backstop_emission", poolID, false, nil)
+	case "UEmisData":
+		poolID, user, ok := backstopPoolUser(args)
+		if !ok {
+			return
+		}
+		entityKey := typedBackstopEntityKey(user, poolID)
+		balance, exists := b.backstopUsers[entityKey]
+		if !exists {
+			return
+		}
+		balance.emisIndexRaw = ""
+		balance.emisAccruedRaw = ""
+		if balance.sharesRaw == "" && len(balance.q4w) == 0 {
+			// The entry only existed for the emission accrual — drop it.
+			delete(b.backstopUsers, entityKey)
+			b.addDelta(ledgerSeq, "backstop_position", entityKey, false, nil)
+			return
+		}
+		b.backstopUsers[entityKey] = balance
+		b.addDelta(ledgerSeq, "backstop_position", entityKey, true, b.backstopPosition(balance))
+	case "Auction":
+		user, auctType, ok := auctionKeyParts(args)
+		if !ok {
+			return
+		}
+		// Auctions are temporary storage: not-live (filled, deleted, or
+		// TTL-lapsed) means the auction is gone on-chain — remove, never archive.
+		entityKey := typedAuctionEntityKey(change.ContractID, user, auctType)
+		delete(b.auctions, entityKey)
+		b.addDelta(ledgerSeq, "auction", entityKey, false, nil)
+	case "UserEmis":
+		user, resTokenID, ok := userReserveKeyParts(args)
+		if !ok {
+			return
+		}
+		// Absent-not-zero: a not-live accrual entry leaves the user's emission
+		// state absent (it re-folds from bronze on restore), never zero-filled.
+		entityKey := typedUserEmisEntityKey(user, change.ContractID, resTokenID)
+		delete(b.userEmis, entityKey)
+		b.addDelta(ledgerSeq, "user_emission", entityKey, false, nil)
 	}
 }
 
@@ -1044,21 +1297,25 @@ func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPosition
 func (b *blendStateBuilder) backstopPosition(userBalance backstopUserBalance) contracts.BackstopPosition {
 	poolBalance := b.backstopPools[userBalance.poolContract]
 	return contracts.BackstopPosition{
-		Address:              userBalance.user,
-		PoolContractID:       userBalance.poolContract,
-		UserSharesRaw:        userBalance.sharesRaw,
-		PoolSharesRaw:        poolBalance.sharesRaw,
-		PoolTokensRaw:        poolBalance.tokensRaw,
-		Q4W:                  userBalance.q4w,
-		BLNDDecimals:         7,
-		USDCDecimals:         7,
-		LPTokenSupplyRaw:     "",
-		LPBLNDReserveRaw:     "",
-		LPUSDCReserveRaw:     "",
-		BLNDPriceUSD:         "",
-		USDCPriceUSD:         "",
-		BackstopInterestAPY:  "",
-		BackstopEmissionsAPY: "",
+		Address:        userBalance.user,
+		PoolContractID: userBalance.poolContract,
+		UserSharesRaw:  userBalance.sharesRaw,
+		PoolSharesRaw:  poolBalance.sharesRaw,
+		PoolTokensRaw:  poolBalance.tokensRaw,
+		Q4W:            userBalance.q4w,
+		// The UEmisData sibling entry, when present: the user's checkpointed
+		// unclaimed backstop BLND and last accrued index. Absent stays "".
+		UnclaimedEmissionsRaw: userBalance.emisAccruedRaw,
+		EmisIndexRaw:          userBalance.emisIndexRaw,
+		BLNDDecimals:          7,
+		USDCDecimals:          7,
+		LPTokenSupplyRaw:      "",
+		LPBLNDReserveRaw:      "",
+		LPUSDCReserveRaw:      "",
+		BLNDPriceUSD:          "",
+		USDCPriceUSD:          "",
+		BackstopInterestAPY:   "",
+		BackstopEmissionsAPY:  "",
 	}
 }
 
@@ -1077,6 +1334,26 @@ func typedBackstopPool(balance backstopPoolBalance) typedBackstopPoolDelta {
 		SharesRaw:      balance.sharesRaw,
 		TokensRaw:      balance.tokensRaw,
 		Q4WRaw:         balance.q4wRaw,
+	}
+}
+
+// typedBackstopEmisDelta is the silver-debug delta payload for a pool's
+// BEmisData entry (exported fields so addDelta can JSON-marshal it).
+type typedBackstopEmisDelta struct {
+	PoolContractID string
+	EPSRaw         string
+	ExpirationRaw  string
+	IndexRaw       string
+	LastTimeRaw    string
+}
+
+func typedBackstopEmis(emis backstopEmisData) typedBackstopEmisDelta {
+	return typedBackstopEmisDelta{
+		PoolContractID: emis.poolContract,
+		EPSRaw:         emis.epsRaw,
+		ExpirationRaw:  emis.expirationRaw,
+		IndexRaw:       emis.indexRaw,
+		LastTimeRaw:    emis.lastTimeRaw,
 	}
 }
 
@@ -1099,6 +1376,14 @@ func (b *blendStateBuilder) addDelta(ledgerSeq int64, entityType, entityKey stri
 func typedReserveEntityKey(poolID, assetID string) string  { return poolID + "|" + assetID }
 func typedUserEntityKey(address, poolID string) string     { return address + "|" + poolID }
 func typedBackstopEntityKey(address, poolID string) string { return address + "|" + poolID }
+
+func typedAuctionEntityKey(poolID, user string, auctType int32) string {
+	return poolID + "|" + user + "|" + strconv.FormatInt(int64(auctType), 10)
+}
+
+func typedUserEmisEntityKey(address, poolID string, resTokenID int32) string {
+	return address + "|" + poolID + "|" + strconv.FormatInt(int64(resTokenID), 10)
+}
 
 func sortLedgerState(pools []contracts.PoolState, users []contracts.UserReservePosition, backstops []contracts.BackstopPosition) {
 	sort.Slice(pools, func(i, j int) bool { return pools[i].ContractID < pools[j].ContractID })
@@ -1282,7 +1567,14 @@ func applyReserveData(reserve *reserveBuilder, value xdr.ScVal) {
 		reserve.state.DSupplyRaw = dSupply
 	}
 	if backstopCredit, ok := fieldIntString(fields, "backstop_credit"); ok {
+		// PoolBalanceRaw keeps carrying backstop_credit for compatibility with
+		// existing consumers (surfaced as pool_balance_raw metadata); the field
+		// also lands under its own on-chain name.
 		reserve.state.PoolBalanceRaw = backstopCredit
+		reserve.state.BackstopCreditRaw = backstopCredit
+	}
+	if lastTime, ok := fieldIntString(fields, "last_time"); ok {
+		reserve.state.LastTimeRaw = lastTime
 	}
 }
 
@@ -1310,13 +1602,19 @@ func applyReserveEmisConfig(reserve *reserveBuilder, side uint32, value xdr.ScVa
 	}
 }
 
-// applyReserveEmisData decodes one side's ReserveEmissionsData {index,
-// last_time} onto the reserve. side follows the same convention as
-// applyReserveEmisConfig.
+// applyReserveEmisData decodes one side's emission-data entry onto the
+// reserve. side follows the same convention as applyReserveEmisConfig.
+// blend-contracts-v2 merged the v1 config/data split into one struct —
+// EmisData(u32) now holds ReserveEmissionData {expiration, eps, index,
+// last_time} — so eps/expiration are read here too when present. Every field
+// stays independently optional: a v1-shaped {index, last_time} entry sets
+// only those two, and an absent field is never zero-filled.
 func applyReserveEmisData(reserve *reserveBuilder, side uint32, value xdr.ScVal) {
 	fields := scMapFields(value)
 	index, indexOK := fieldIntString(fields, "index")
 	lastTime, lastOK := fieldIntString(fields, "last_time")
+	eps, epsOK := fieldIntString(fields, "eps")
+	expiration, expOK := fieldIntString(fields, "expiration")
 	if side == 1 {
 		if indexOK {
 			reserve.state.SupplyEmisIndexRaw = index
@@ -1324,12 +1622,24 @@ func applyReserveEmisData(reserve *reserveBuilder, side uint32, value xdr.ScVal)
 		if lastOK {
 			reserve.state.SupplyEmisLastTimeRaw = lastTime
 		}
+		if epsOK {
+			reserve.state.SupplyEmisEPSRaw = eps
+		}
+		if expOK {
+			reserve.state.SupplyEmisExpirationRaw = expiration
+		}
 	} else {
 		if indexOK {
 			reserve.state.BorrowEmisIndexRaw = index
 		}
 		if lastOK {
 			reserve.state.BorrowEmisLastTimeRaw = lastTime
+		}
+		if epsOK {
+			reserve.state.BorrowEmisEPSRaw = eps
+		}
+		if expOK {
+			reserve.state.BorrowEmisExpirationRaw = expiration
 		}
 	}
 }
@@ -1348,13 +1658,23 @@ func clearReserveEmisConfig(reserve *reserveBuilder, side uint32) {
 	}
 }
 
+// clearReserveEmisData clears all four emission fields: on the v2 deploy the
+// EmisData entry is the sole source of eps/expiration too (ReserveEmissionData
+// merged the v1 split), so leaving them set after the entry goes not-live
+// would fabricate an active emission that no longer exists on-chain. Under a
+// v1-style split the (persisted) EmisConfig entry re-folds eps/expiration on
+// its next write.
 func clearReserveEmisData(reserve *reserveBuilder, side uint32) {
 	if side == 1 {
 		reserve.state.SupplyEmisIndexRaw = ""
 		reserve.state.SupplyEmisLastTimeRaw = ""
+		reserve.state.SupplyEmisEPSRaw = ""
+		reserve.state.SupplyEmisExpirationRaw = ""
 	} else {
 		reserve.state.BorrowEmisIndexRaw = ""
 		reserve.state.BorrowEmisLastTimeRaw = ""
+		reserve.state.BorrowEmisEPSRaw = ""
+		reserve.state.BorrowEmisExpirationRaw = ""
 	}
 }
 
@@ -1698,6 +2018,137 @@ func decodeBackstopUserBalance(poolID, user string, value xdr.ScVal) backstopUse
 		})
 	}
 	return balance
+}
+
+// decodeBackstopEmisData decodes a BEmisData(pool) value (BackstopEmissionData
+// {expiration, eps, index, last_time}). Each field is independently optional:
+// only the fields present on-chain are set, absent ones stay "". A value that
+// yields no field at all (wrong ScVal shape) reports !ok so the caller keeps
+// the carried entry instead of wiping it.
+func decodeBackstopEmisData(poolID string, value xdr.ScVal) (backstopEmisData, bool) {
+	fields := scMapFields(value)
+	emis := backstopEmisData{poolContract: poolID}
+	if eps, ok := fieldIntString(fields, "eps"); ok {
+		emis.epsRaw = eps
+	}
+	if expiration, ok := fieldIntString(fields, "expiration"); ok {
+		emis.expirationRaw = expiration
+	}
+	if index, ok := fieldIntString(fields, "index"); ok {
+		emis.indexRaw = index
+	}
+	if lastTime, ok := fieldIntString(fields, "last_time"); ok {
+		emis.lastTimeRaw = lastTime
+	}
+	return emis, !emis.empty()
+}
+
+// decodeUserEmissionData decodes a UserEmissionData {index, accrued} value
+// (shared by the pool's UserEmis and the backstop's UEmisData). Both fields
+// are required — the contract always writes both, so a value missing either
+// is malformed and skipped whole rather than half-written.
+func decodeUserEmissionData(value xdr.ScVal) (indexRaw, accruedRaw string, ok bool) {
+	fields := scMapFields(value)
+	indexRaw, indexOK := fieldIntString(fields, "index")
+	accruedRaw, accruedOK := fieldIntString(fields, "accrued")
+	if !indexOK || !accruedOK {
+		return "", "", false
+	}
+	return indexRaw, accruedRaw, true
+}
+
+// decodeAuctionState decodes an Auction(AuctionKey) value (AuctionData {bid,
+// lot, block}). All three fields are required and every lot/bid entry must
+// decode — a partial auction would under-report a liquidation's lot or bid,
+// so any malformed piece rejects the whole value (the caller then keeps the
+// carried state untouched). Lot/bid may legitimately be empty maps.
+func decodeAuctionState(poolID, user string, auctType int32, value xdr.ScVal) (contracts.AuctionState, bool) {
+	fields := scMapFields(value)
+	if fields == nil {
+		return contracts.AuctionState{}, false
+	}
+	blockVal, hasBlock := fields["block"]
+	block, blockOK := scInt64(blockVal)
+	lot, lotOK := decodeAuctionEntries(fields["lot"])
+	bid, bidOK := decodeAuctionEntries(fields["bid"])
+	if !hasBlock || !blockOK || !lotOK || !bidOK {
+		return contracts.AuctionState{}, false
+	}
+	return contracts.AuctionState{
+		PoolContractID: poolID,
+		UserAddress:    user,
+		AuctionType:    auctType,
+		Block:          block,
+		Lot:            lot,
+		Bid:            bid,
+	}, true
+}
+
+// decodeAuctionEntries decodes one lot/bid Map<Address, i128> into entries
+// sorted by asset. Any entry that fails to decode rejects the whole map.
+func decodeAuctionEntries(value xdr.ScVal) ([]contracts.AuctionEntry, bool) {
+	raw, ok := value.GetMap()
+	if !ok || raw == nil {
+		return nil, false
+	}
+	entries := make([]contracts.AuctionEntry, 0, len(*raw))
+	for _, entry := range *raw {
+		asset, ok := scAddress(entry.Key)
+		if !ok {
+			return nil, false
+		}
+		amount, ok := scIntString(entry.Val)
+		if !ok {
+			return nil, false
+		}
+		entries = append(entries, contracts.AuctionEntry{AssetID: asset, AmountRaw: amount})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].AssetID < entries[j].AssetID })
+	return entries, true
+}
+
+// auctionKeyParts reads an AuctionKey variant payload ({user, auct_type} as a
+// struct map, or the positional two-arg form some encoders emit).
+func auctionKeyParts(args []xdr.ScVal) (string, int32, bool) {
+	if len(args) == 1 {
+		fields := scMapFields(args[0])
+		user, userOK := fieldAddress(fields, "user")
+		auctType, typeOK := fieldInt32(fields, "auct_type")
+		return user, auctType, userOK && typeOK
+	}
+	if len(args) >= 2 {
+		user, userOK := scAddress(args[0])
+		auctType, typeOK := scInt32(args[1])
+		if !userOK || !typeOK {
+			// Tolerate either argument order — the key is a struct on-chain, so
+			// positional encoders may emit (type, user) as well as (user, type).
+			user, userOK = scAddress(args[1])
+			auctType, typeOK = scInt32(args[0])
+		}
+		return user, auctType, userOK && typeOK
+	}
+	return "", 0, false
+}
+
+// userReserveKeyParts reads a UserReserveKey variant payload ({user,
+// reserve_id} as a struct map, or the positional two-arg form).
+func userReserveKeyParts(args []xdr.ScVal) (string, int32, bool) {
+	if len(args) == 1 {
+		fields := scMapFields(args[0])
+		user, userOK := fieldAddress(fields, "user")
+		resTokenID, idOK := fieldInt32(fields, "reserve_id")
+		return user, resTokenID, userOK && idOK
+	}
+	if len(args) >= 2 {
+		user, userOK := scAddress(args[0])
+		resTokenID, idOK := scInt32(args[1])
+		if !userOK || !idOK {
+			user, userOK = scAddress(args[1])
+			resTokenID, idOK = scInt32(args[0])
+		}
+		return user, resTokenID, userOK && idOK
+	}
+	return "", 0, false
 }
 
 func variantAddress(args []xdr.ScVal) (string, bool) {

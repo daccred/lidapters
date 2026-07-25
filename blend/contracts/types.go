@@ -74,6 +74,15 @@ type PoolState struct {
 	BackstopSharesRaw    string
 	BackstopTokensRaw    string
 	BackstopQ4WSharesRaw string
+	// Backstop pool-level emission accrual: the backstop contract's
+	// BEmisData(pool) entry (BackstopEmissionData {expiration, eps, index,
+	// last_time}), riding on PoolState for the same carry reason as the balance
+	// fields above. Empty string means the entry (or that field) is absent
+	// on-chain — emissions not activated — never a fabricated "0".
+	BackstopEmisEPSRaw        string
+	BackstopEmisExpirationRaw string
+	BackstopEmisIndexRaw      string
+	BackstopEmisLastTimeRaw   string
 }
 
 type ReserveState struct {
@@ -118,6 +127,13 @@ type ReserveState struct {
 	BorrowEmisExpirationRaw string
 	BorrowEmisIndexRaw      string
 	BorrowEmisLastTimeRaw   string
+	// BackstopCreditRaw is ResData's backstop_credit — underlying accrued to the
+	// backstop (protocol take on debt interest) but not yet gulped. It directly
+	// reduces true available liquidity. LastTimeRaw is ResData's last_time — the
+	// unix second the reserve's rates last accrued, letting a consumer reproduce
+	// interest to now deterministically. Both empty when absent on-chain.
+	BackstopCreditRaw string
+	LastTimeRaw       string
 	// Archived marks a reserve whose ResConfig/ResData entry went not-live via
 	// TTL lapse or network-level eviction rather than an explicit on-chain
 	// delete. The reserve (and its reserveByIndex slot) is kept rather than
@@ -146,19 +162,64 @@ type UserReservePosition struct {
 	ArchivedLedgerSeq int64
 }
 
+// AuctionState is one live auction's decoded on-chain state: the pool's
+// Auction(AuctionKey{user, auct_type}) temporary entry (AuctionData {bid, lot,
+// block}). AuctionType follows the contract's enum: 0 = user_liquidation,
+// 1 = bad_debt, 2 = interest. Lot and Bid are the full per-asset maps, sorted
+// by asset for deterministic output; their unit depends on the auction type
+// (see the contract's AuctionData docs — e.g. a user liquidation's lot is
+// bTokens and bid is dTokens). The entry is temporary storage: when it goes
+// not-live on-chain (filled, deleted, or TTL-lapsed) the auction is gone.
+type AuctionState struct {
+	PoolContractID string
+	UserAddress    string
+	AuctionType    int32
+	Block          int64
+	Lot            []AuctionEntry
+	Bid            []AuctionEntry
+}
+
+// AuctionEntry is one asset's amount within an auction's lot or bid map.
+type AuctionEntry struct {
+	AssetID   string
+	AmountRaw string
+}
+
+// UserEmissionState is one user's per-reserve-token emission accrual: the
+// pool's UserEmis(UserReserveKey{user, reserve_id}) entry (UserEmissionData
+// {index, accrued}). ReserveTokenID is the contract's res_token_id
+// (reserve_index*2 + side; side 1 = supply/b-token, 0 = borrow/d-token), kept
+// raw so the entry survives even when the reserve list is not yet known;
+// asset/side resolution happens at transform time. AccruedRaw is the user's
+// checkpointed unclaimed BLND for that reserve token. Both fields are decoded
+// verbatim; an absent entry is absent from the slice, never zero-filled.
+type UserEmissionState struct {
+	Address        string
+	PoolContractID string
+	ReserveTokenID int32
+	IndexRaw       string
+	AccruedRaw     string
+}
+
 type Q4WEntry struct {
 	SharesRaw string
 	UnlockAt  time.Time
 }
 
 type BackstopPosition struct {
-	Address               string
-	PoolContractID        string
-	UserSharesRaw         string
-	PoolSharesRaw         string
-	PoolTokensRaw         string
-	Q4W                   []Q4WEntry
+	Address        string
+	PoolContractID string
+	UserSharesRaw  string
+	PoolSharesRaw  string
+	PoolTokensRaw  string
+	Q4W            []Q4WEntry
+	// UnclaimedEmissionsRaw is the backstop contract's UEmisData(pool, user)
+	// accrued value — the user's checkpointed, not-yet-claimed backstop BLND.
+	// EmisIndexRaw is the same entry's index (the user's last accrued emission
+	// index, 14 decimals). Both empty when the entry is absent on-chain —
+	// emissions not activated or nothing accrued — never a fabricated "0".
 	UnclaimedEmissionsRaw string
+	EmisIndexRaw          string
 	LPTokenSupplyRaw      string
 	LPBLNDReserveRaw      string
 	LPUSDCReserveRaw      string

@@ -69,6 +69,18 @@ type LedgerState struct {
 	// symbol/name/decimals. Carried state only — never emitted to gold; it feeds
 	// Reserve.Metadata / Activity.AssetSymbol in the transform instead.
 	Assets []contracts.AssetMetadata
+	// Auctions carries each live auction's decoded state (the pool's
+	// Auction(AuctionKey) temporary entries). An auction entry only appears in
+	// the ledger it changes, so without carrying it here every later ledger
+	// would forget the auction while it is still live on-chain. Removed the
+	// ledger the entry goes not-live (filled/deleted/TTL-lapsed — temporary
+	// storage, so not-live means gone).
+	Auctions []contracts.AuctionState
+	// UserEmissions carries each user's per-reserve-token emission accrual
+	// (the pool's UserEmis(UserReserveKey) entries). Same carry requirement as
+	// Auctions: the entry is only written when the user's accrual checkpoints,
+	// so it must ride here to survive to the next ledger.
+	UserEmissions []contracts.UserEmissionState
 	// AMMPools and AMMPositions are the protocol-neutral state carrier for
 	// share-based and concentrated-liquidity AMMs. They intentionally sit beside
 	// the legacy Blend slices so existing checkpoints remain JSON-compatible.
@@ -423,19 +435,71 @@ type Backstop struct {
 // reserve's emission config, keyed like Reserve plus Side. APY is "" when it
 // cannot be derived (e.g. no emitted-token price feed) — never a fabricated
 // value. A side with no active emission config is simply absent from the
-// slice, not emitted with a zero EPS.
+// slice, not emitted with a zero EPS. IndexRaw / LastTimeRaw are the side's
+// accrual checkpoint (ReserveEmissionData index, 14 decimals, and last_time
+// unix seconds); "" when the accrual half is absent on-chain.
 type ReserveEmission struct {
-	ID         string
-	Protocol   string
-	ContractID string
-	AssetID    string
-	Side       string // "supply" | "borrow"
-	EPSRaw     string
-	Expiration time.Time
-	APY        string
-	LedgerSeq  int64
-	Timestamp  time.Time
-	Metadata   map[string]string
+	ID          string
+	Protocol    string
+	ContractID  string
+	AssetID     string
+	Side        string // "supply" | "borrow"
+	EPSRaw      string
+	Expiration  time.Time
+	APY         string
+	IndexRaw    string
+	LastTimeRaw string
+	LedgerSeq   int64
+	Timestamp   time.Time
+	Metadata    map[string]string
+}
+
+// Auction is one live auction surfaced to gold: structured liquidation /
+// bad-debt / interest auction state, previously visible only as a coarse
+// activity. AuctionType is the label form of the contract's enum
+// (user_liquidation | bad_debt | interest). Lot and Bid carry the full
+// per-asset maps; their unit depends on the auction type (a user
+// liquidation's lot is bTokens, bid is dTokens).
+type Auction struct {
+	ID          string
+	Protocol    string
+	ContractID  string // the pool running the auction
+	UserAddress string // the address whose assets are being auctioned
+	AuctionType string
+	Block       int64
+	Lot         []AuctionAmount
+	Bid         []AuctionAmount
+	LedgerSeq   int64
+	Timestamp   time.Time
+	Metadata    map[string]string
+}
+
+// AuctionAmount is one asset's amount within an auction's lot or bid.
+type AuctionAmount struct {
+	AssetID   string
+	AmountRaw string
+}
+
+// UserEmission is one user's per-reserve-token emission accrual surfaced to
+// gold: the checkpointed unclaimed BLND (AccruedRaw) plus the user's last
+// accrued index (IndexRaw, 14 decimals) for one reserve side. AssetID and
+// Side are resolved from the pool's reserve list when known; AssetID is ""
+// when the reserve index cannot be resolved yet (the raw ReserveTokenID is
+// always present). An absent on-chain entry is absent here — never
+// zero-filled.
+type UserEmission struct {
+	ID             string
+	Protocol       string
+	ContractID     string // the pool
+	Address        string
+	AssetID        string
+	ReserveTokenID int32
+	Side           string // "supply" | "borrow"
+	IndexRaw       string
+	AccruedRaw     string
+	LedgerSeq      int64
+	Timestamp      time.Time
+	Metadata       map[string]string
 }
 
 type Contract struct {
@@ -463,20 +527,22 @@ type QuarantineEvent struct {
 }
 
 type TransformOutput struct {
-	LedgerSeq         int64
-	Activities        []Activity
-	Positions         []Position
-	Summaries         []PositionSummary
-	Reserves          []Reserve
-	ReserveEmissions  []ReserveEmission
-	Backstops         []Backstop
-	Contracts         []Contract
-	Quarantine        []QuarantineEvent
-	AMMPools          []AMMPool
-	AMMComponents     []AMMPositionComponent
-	AMMRewards        []AMMReward
+	LedgerSeq          int64
+	Activities         []Activity
+	Positions          []Position
+	Summaries          []PositionSummary
+	Reserves           []Reserve
+	ReserveEmissions   []ReserveEmission
+	UserEmissions      []UserEmission
+	Auctions           []Auction
+	Backstops          []Backstop
+	Contracts          []Contract
+	Quarantine         []QuarantineEvent
+	AMMPools           []AMMPool
+	AMMComponents      []AMMPositionComponent
+	AMMRewards         []AMMReward
 	PositionTombstones []PositionTombstone
-	SummaryTombstones []SummaryTombstone
+	SummaryTombstones  []SummaryTombstone
 }
 
 type AMMPool struct {

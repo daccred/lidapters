@@ -1,0 +1,145 @@
+{
+  "_comment": [
+    "Golden snapshot: REAL mainnet live ledger entries for the Blend V2 config",
+    "surfaces that never get rewritten inside an RPC retention window - the pool",
+    "instance entries (identity: Name/Admin/BLNDTkn/Backstop + Config live in",
+    "instance storage), the standalone persistent ResList and PoolEmis entries, the",
+    "V2 backstop instance and its RZ / DropList / LastDist entries. Fetched",
+    "2026-07-25 via https://mainnet.sorobanrpc.com getLedgerEntries at latest",
+    "ledger 63637827 (scratchpad/blend-fixture -live). Values are untouched XDR;",
+    "'found': false records a probed key with no live entry (the three ResInit",
+    "probes: temporary entries that only exist while a set_reserve is queued -",
+    "absent is the real on-chain state, no fabricated entries)."
+  ],
+  "network": "Public Global Stellar Network ; September 2015",
+  "latest_ledger": 63637827,
+  "entries": [
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "instance",
+      "key_xdr": "AAAAFA==",
+      "value_xdr": "AAAAEwAAAACkH8U9Z1O2wE6xWwIcVQUjZqTI4OIbxycA9GEmTsE1DgAAAAEAAAAFAAAADwAAAAVBZG1pbgAAAAAAABIAAAAAAAAAAC+q1tU9O4hjqdtSG6jo2Uqst7wJPGikVpIVIOZwslLUAAAADwAAAAdCTE5EVGtuAAAAABIAAAAB9dY2s8jXzG7hE8SbmuCde2oc7rMwUvMBIanSieZmJ1MAAAAPAAAACEJhY2tzdG9wAAAAEgAAAAEhCPZWDdSDZU8ORn2pnTQ6ak3qD9ICiQ1eQi7a70qibQAAAA8AAAAGQ29uZmlnAAAAAAARAAAAAQAAAAUAAAAPAAAACmJzdG9wX3JhdGUAAAAAAAMAHoSAAAAADwAAAA1tYXhfcG9zaXRpb25zAAAAAAAAAwAAAAYAAAAPAAAADm1pbl9jb2xsYXRlcmFsAAAAAAAKAAAAAAAAAAAAAAAAAvrwgAAAAA8AAAAGb3JhY2xlAAAAAAASAAAAAas620KoPpWfkXQM/Yqcnsl6iV7wMmkzjKQfcCOQOLL3AAAADwAAAAZzdGF0dXMAAAAAAAMAAAABAAAADwAAAAROYW1lAAAADgAAAAVGaXhlZAAAAA==",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 61962028,
+      "live_until_ledger_seq": 64157472,
+      "found": true
+    },
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "ResList",
+      "key_xdr": "AAAADwAAAAdSZXNMaXN0AA==",
+      "value_xdr": "AAAAEAAAAAEAAAADAAAAEgAAAAEltPzYWa7C+mNIQ4xImzw8EMmLbSG+T9PLMMtolT75dwAAABIAAAABre/OWa7lKWj3YGHUlMJSW3Vln6QpamX0me8p5WR35JYAAAASAAAAAean2et1IwBqRpqnSDrREHJHRDwNguYnY95nCEjE6XyQ",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 56615481,
+      "live_until_ledger_seq": 64417979,
+      "found": true
+    },
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "PoolEmis",
+      "key_xdr": "AAAADwAAAAhQb29sRW1pcw==",
+      "value_xdr": "AAAAEQAAAAEAAAADAAAAAwAAAAEAAAAFAAAAAAAehIAAAAADAAAAAgAAAAUAAAAAAD0JAAAAAAMAAAAEAAAABQAAAAAAPQkA",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 56615482,
+      "live_until_ledger_seq": 64416936,
+      "found": true
+    },
+    {
+      "contract_id": "CCCCIQSDILITHMM7PBSLVDT5MISSY7R26MNZXCX4H7J5JQ5FPIYOGYFS",
+      "label": "instance",
+      "key_xdr": "AAAAFA==",
+      "value_xdr": "AAAAEwAAAACkH8U9Z1O2wE6xWwIcVQUjZqTI4OIbxycA9GEmTsE1DgAAAAEAAAAFAAAADwAAAAVBZG1pbgAAAAAAABIAAAABGywWrEP+muCZhz28aRqqyVasaU8g3MxhMtzjKpF87cAAAAAPAAAAB0JMTkRUa24AAAAAEgAAAAH11jazyNfMbuETxJua4J17ahzuszBS8wEhqdKJ5mYnUwAAAA8AAAAIQmFja3N0b3AAAAASAAAAASEI9lYN1INlTw5GfamdNDpqTeoP0gKJDV5CLtrvSqJtAAAADwAAAAZDb25maWcAAAAAABEAAAABAAAABQAAAA8AAAAKYnN0b3BfcmF0ZQAAAAAAAwAehIAAAAAPAAAADW1heF9wb3NpdGlvbnMAAAAAAAADAAAABgAAAA8AAAAObWluX2NvbGxhdGVyYWwAAAAAAAoAAAAAAAAAAAAAAAAC+vCAAAAADwAAAAZvcmFjbGUAAAAAABIAAAAB/8BsXeEVSpDUF6zZ0e6Zw+1yxVXbtGJlSa+yHuO5xYYAAAAPAAAABnN0YXR1cwAAAAAAAwAAAAAAAAAPAAAABE5hbWUAAAAOAAAACVlpZWxkQmxveAAAAA==",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 63175421,
+      "live_until_ledger_seq": 64171091,
+      "found": true
+    },
+    {
+      "contract_id": "CCCCIQSDILITHMM7PBSLVDT5MISSY7R26MNZXCX4H7J5JQ5FPIYOGYFS",
+      "label": "ResList",
+      "key_xdr": "AAAADwAAAAdSZXNMaXN0AA==",
+      "value_xdr": "AAAAEAAAAAEAAAAIAAAAEgAAAAEltPzYWa7C+mNIQ4xImzw8EMmLbSG+T9PLMMtolT75dwAAABIAAAABre/OWa7lKWj3YGHUlMJSW3Vln6QpamX0me8p5WR35JYAAAASAAAAAean2et1IwBqRpqnSDrREHJHRDwNguYnY95nCEjE6XyQAAAAEgAAAAEohS9owZhIjjRvsSEu1QKQU3Ycwk9FM5LjU5ggGwgl5wAAABIAAAABda9lxMXmF49wIYAZpxJWahfp4JERJZtyCybeiJyGaVwAAAASAAAAAVdeAnJFqe+IsoU02sVIbBCqZ04cshomaebqmsZBnnDnAAAAEgAAAAEX4kdTR4U4gx4Jb2bYH7Txel5wEegRIDTrvKZs6Sm9nwAAABIAAAABhRsf0Nla/aNI78I1s6AoJ/d5xfGVBwvSklowVjnv5PM=",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 60065049,
+      "live_until_ledger_seq": 64430291,
+      "found": true
+    },
+    {
+      "contract_id": "CCCCIQSDILITHMM7PBSLVDT5MISSY7R26MNZXCX4H7J5JQ5FPIYOGYFS",
+      "label": "PoolEmis",
+      "key_xdr": "AAAADwAAAAhQb29sRW1pcw==",
+      "value_xdr": "AAAAEQAAAAEAAAAEAAAAAwAAAAAAAAAFAAAAAAAW42AAAAADAAAAAQAAAAUAAAAAAA9CQAAAAAMAAAACAAAABQAAAAAATEtAAAAAAwAAAAMAAAAFAAAAAAAmJaA=",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 62586200,
+      "live_until_ledger_seq": 64416938,
+      "found": true
+    },
+    {
+      "contract_id": "CAQQR5SWBXKIGZKPBZDH3KM5GQ5GUTPKB7JAFCINLZBC5WXPJKRG3IM7",
+      "label": "instance",
+      "key_xdr": "AAAAFA==",
+      "value_xdr": "AAAAEwAAAADB9FAqdX4lxhH1oVm8GrDu9kCFraxsaBI9ymbof6/7wgAAAAEAAAAFAAAADwAAAAdCTE5EVGtuAAAAABIAAAAB9dY2s8jXzG7hE8SbmuCde2oc7rMwUvMBIanSieZmJ1MAAAAPAAAABkJUb2tlbgAAAAAAEgAAAAElsq/TXlQzGkiQw2MZ957bGPB4nkf8OHs7MO8uaaVNGgAAAA8AAAAHRW1pdHRlcgAAAAASAAAAAZ0Gel9AkUsDWuu6+SbUCRlzFlK2nwK7xX8HAimS6MEoAAAADwAAAAhQb29sRmFjdAAAABIAAAAB5YcCty4/JnZe4jL3vwHhqmMtkKliR8oQJmqLXv2Otm4AAAAPAAAAB1VTRENUa24AAAAAEgAAAAGt785ZruUpaPdgYdSUwlJbdWWfpClqZfSZ7ynlZHfklg==",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 56615429,
+      "live_until_ledger_seq": 64167448,
+      "found": true
+    },
+    {
+      "contract_id": "CAQQR5SWBXKIGZKPBZDH3KM5GQ5GUTPKB7JAFCINLZBC5WXPJKRG3IM7",
+      "label": "RZ",
+      "key_xdr": "AAAADwAAAAJSWgAA",
+      "value_xdr": "AAAAEAAAAAEAAAAFAAAAEgAAAAHYCqXlu8A2j3iK+BkzYFZsKZWX18y13Exe3j9o5IS6VwAAABIAAAABcODP+RCXAQaYwgAcrkQw3kpa4qXhPOHG3gI4/pvvx9wAAAASAAAAAQn4VcwK892IcTK3RsYnN0metgD5zzKCRGYDY5vMGXM8AAAAEgAAAAGEJEJDQtEzsZ94ZLqOfWIlLH468xubivw/09TDpXow4wAAABIAAAABEpzIzGM28f273MDzmDQ0w824X9nqhWl6N4LTGNh0pYA=",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 60104370,
+      "live_until_ledger_seq": 64416935,
+      "found": true
+    },
+    {
+      "contract_id": "CAQQR5SWBXKIGZKPBZDH3KM5GQ5GUTPKB7JAFCINLZBC5WXPJKRG3IM7",
+      "label": "DropList",
+      "key_xdr": "AAAADwAAAAhEcm9wTGlzdA==",
+      "value_xdr": "AAAAEAAAAAEAAAACAAAAEAAAAAEAAAACAAAAEgAAAAFDRl/9MM1sjH0fADwSVL5qLgk+Z7q50aglCbaDGgHhQQAAAAoAAAAAAAAAAAAACRhOcqAAAAAAEAAAAAEAAAACAAAAEgAAAAFL1c09wf3G44zNr3o8rMdWOn/kGIkQi0w6WkyZlrPmagAAAAoAAAAAAAAAAAAACRhOcqAA",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 56615429,
+      "live_until_ledger_seq": 0,
+      "found": true
+    },
+    {
+      "contract_id": "CAQQR5SWBXKIGZKPBZDH3KM5GQ5GUTPKB7JAFCINLZBC5WXPJKRG3IM7",
+      "label": "LastDist",
+      "key_xdr": "AAAADwAAAAhMYXN0RGlzdA==",
+      "value_xdr": "AAAABQAAAABqYwXY",
+      "durability": "ContractDataDurabilityPersistent",
+      "last_modified_ledger": 63622055,
+      "live_until_ledger_seq": 64416935,
+      "found": true
+    },
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "ResInit:CAS3J7",
+      "key_xdr": "AAAAEAAAAAEAAAACAAAADwAAAAdSZXNJbml0AAAAABIAAAABJbT82FmuwvpjSEOMSJs8PBDJi20hvk/TyzDLaJU++Xc=",
+      "value_xdr": null,
+      "durability": "ContractDataDurabilityTemporary",
+      "last_modified_ledger": 0,
+      "found": false
+    },
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "ResInit:CCW67T",
+      "key_xdr": "AAAAEAAAAAEAAAACAAAADwAAAAdSZXNJbml0AAAAABIAAAABre/OWa7lKWj3YGHUlMJSW3Vln6QpamX0me8p5WR35JY=",
+      "value_xdr": null,
+      "durability": "ContractDataDurabilityTemporary",
+      "last_modified_ledger": 0,
+      "found": false
+    },
+    {
+      "contract_id": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "label": "ResInit:CDTKPW",
+      "key_xdr": "AAAAEAAAAAEAAAACAAAADwAAAAdSZXNJbml0AAAAABIAAAAB5qfZ63UjAGpGmqdIOtEQckdEPA2C5idj3mcISMTpfJA=",
+      "value_xdr": null,
+      "durability": "ContractDataDurabilityTemporary",
+      "last_modified_ledger": 0,
+      "found": false
+    }
+  ]
+}

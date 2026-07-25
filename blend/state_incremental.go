@@ -196,6 +196,23 @@ func (s *incrementalStrategy) normalizeCarry() {
 			}
 		}
 	}
+	// backstopEmis follows the identical round-trip rule as backstopPools: it is
+	// not carried in its own right — loadPrior reconstructs it from each pool's
+	// BackstopEmis*Raw fields, so an entry for an unknown pool or with all-empty
+	// fields does not survive a ledger boundary.
+	b.backstopEmis = map[string]backstopEmisData{}
+	for id, pool := range b.pools {
+		emis := backstopEmisData{
+			poolContract:  id,
+			epsRaw:        pool.state.BackstopEmisEPSRaw,
+			expirationRaw: pool.state.BackstopEmisExpirationRaw,
+			indexRaw:      pool.state.BackstopEmisIndexRaw,
+			lastTimeRaw:   pool.state.BackstopEmisLastTimeRaw,
+		}
+		if !emis.empty() {
+			b.backstopEmis[id] = emis
+		}
+	}
 }
 
 // snapshot assembles the next LedgerState. Component for component it mirrors
@@ -215,6 +232,7 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 			pool.state.BackstopTokensRaw = balance.tokensRaw
 			pool.state.BackstopQ4WSharesRaw = balance.q4wRaw
 		}
+		mergeBackstopEmis(pool, b.backstopEmis)
 		pools = append(pools, pool.state)
 	}
 	sort.Slice(pools, func(i, j int) bool { return pools[i].ContractID < pools[j].ContractID })
@@ -316,6 +334,10 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 		PriceFeeds:           b.buildPriceFeeds(),
 		OracleAggregators:    b.buildOracleAggregators(),
 		Assets:               b.buildAssets(),
+		Auctions:             b.buildAuctions(),
+		UserEmissions:        b.buildUserEmissions(),
+		QueuedReserves:       b.buildQueuedReserves(),
+		BackstopInstances:    b.buildBackstopInstances(),
 	}, dirty
 }
 

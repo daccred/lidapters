@@ -140,6 +140,15 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		assetMeta[meta.ContractID] = meta
 	}
 
+	// Oracle freshness/cadence by oracle contract, from the carried oracle
+	// state: the mock oracle's top-level `timestamp` entry (last price update)
+	// and its `res` resolution. Used to annotate each reserve so a consumer
+	// can tell a stale price from a fresh one — absent stays absent.
+	oracleFreshness := map[string]contracts.OracleState{}
+	for _, oracle := range input.State.Oracles {
+		oracleFreshness[oracle.ContractID] = oracle
+	}
+
 	pools := map[string]normalizedPool{}
 	reserves := map[string]normalizedReserve{}
 	for _, pool := range input.State.Pools {
@@ -159,6 +168,34 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			continue
 		}
 		pools[pool.ContractID] = nPool
+		poolContractMeta := map[string]string{
+			"scalar_version":   nPool.scalarVersion,
+			"wasm_hash_source": wasmHashSource,
+		}
+		// Pool instance/config facets (audit section 3), added only when
+		// present on-chain so pre-existing rows stay byte-identical.
+		for key, value := range map[string]string{
+			"pool_name":      pool.Name,
+			"pool_admin":     pool.Admin,
+			"blnd_token":     pool.BLNDToken,
+			"max_positions":  pool.MaxPositionsRaw,
+			"min_collateral": pool.MinCollateralRaw,
+		} {
+			if value != "" {
+				poolContractMeta[key] = value
+			}
+		}
+		if len(pool.PoolEmissions) > 0 {
+			// The per-reserve-token BLND emission split, canonical sorted-key
+			// JSON ({res_token_id: 7-dp share}).
+			split := make(map[string]string, len(pool.PoolEmissions))
+			for _, entry := range pool.PoolEmissions {
+				split[strconv.FormatInt(int64(entry.ReserveTokenID), 10)] = entry.ShareRaw
+			}
+			if raw, err := json.Marshal(split); err == nil {
+				poolContractMeta["pool_emissions"] = string(raw)
+			}
+		}
 		output.Contracts = append(output.Contracts, bindings.Contract{
 			ID:              stableID(a.cfg.Protocol, pool.ContractID),
 			Address:         pool.ContractID,
@@ -168,10 +205,7 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			WasmHash:        pool.WasmHash,
 			FirstSeenLedger: input.LedgerSeq,
 			LastSeenLedger:  input.LedgerSeq,
-			Metadata: map[string]string{
-				"scalar_version":   nPool.scalarVersion,
-				"wasm_hash_source": wasmHashSource,
-			},
+			Metadata:        poolContractMeta,
 		})
 
 		// Pool-level backstop total: the aggregate capital protecting this pool
@@ -187,7 +221,7 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			if !totalShares.IsZero() {
 				q4wPct = numString(q4wShares.Div(totalShares))
 			}
-			output.Backstops = append(output.Backstops, bindings.Backstop{
+			backstopTotal := bindings.Backstop{
 				ID:               stableID(a.cfg.Protocol, pool.ContractID, "backstop_total"),
 				Protocol:         a.cfg.Protocol,
 				ContractID:       pool.ContractID,
@@ -198,7 +232,19 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 				Q4WPct:           q4wPct,
 				LedgerSeq:        input.LedgerSeq,
 				Timestamp:        input.CloseTime,
-			})
+			}
+			// Pool-level backstop emission accrual (BEmisData), surfaced only
+			// when the entry exists on-chain — Metadata stays nil otherwise so
+			// pre-emission output is byte-identical.
+			if pool.BackstopEmisEPSRaw != "" || pool.BackstopEmisExpirationRaw != "" || pool.BackstopEmisIndexRaw != "" || pool.BackstopEmisLastTimeRaw != "" {
+				backstopTotal.Metadata = map[string]string{
+					"emission_eps":        pool.BackstopEmisEPSRaw,
+					"emission_expiration": pool.BackstopEmisExpirationRaw,
+					"emission_index":      pool.BackstopEmisIndexRaw,
+					"emission_last_time":  pool.BackstopEmisLastTimeRaw,
+				}
+			}
+			output.Backstops = append(output.Backstops, backstopTotal)
 		}
 
 		for _, reserve := range pool.Reserves {
@@ -230,6 +276,44 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 				supplyAPY = numString(nReserve.supplyAPRNormalized)
 			}
 
+			reserveMeta := map[string]string{
+				"scalar_version":           nPool.scalarVersion,
+				"asset_symbol":             assetMeta[reserve.AssetID].Symbol,
+				"asset_name":               assetMeta[reserve.AssetID].Name,
+				"asset_decimals":           parseDecimalsInt(nReserve.assetDecimals),
+				"oracle_price_usd":         numString(nReserve.usdPrice),
+				"oracle_price":             numString(nReserve.usdPrice),
+				"b_rate":                   numString(nReserve.bRateRaw.Div(nPool.rateScalar)),
+				"d_rate":                   numString(nReserve.dRateRaw.Div(nPool.rateScalar)),
+				"util_target":              numString(nReserve.utilTargetNormalized),
+				"max_util":                 numString(nReserve.maxUtilNormalized),
+				"r_base":                   numString(nReserve.rBaseNormalized),
+				"r_one":                    numString(nReserve.rOneNormalized),
+				"r_two":                    numString(nReserve.rTwoNormalized),
+				"r_three":                  numString(nReserve.rThreeNormalized),
+				"rate_modifier":            numString(nReserve.rateModifierNormalized),
+				"reactivity":               numString(nReserve.reactivityNormalized),
+				"enabled":                  boolString(reserve.Enabled),
+				"apr_partial":              boolString(nReserve.aprPartial),
+				"pool_balance_raw":         nReserve.raw.PoolBalanceRaw,
+				"backstop_credit_raw":      reserve.BackstopCreditRaw,
+				"accrual_last_time":        reserve.LastTimeRaw,
+				"remaining_borrowable_raw": numString(nReserve.remainingBorrowableRaw),
+				"rate_scalar":              numString(nPool.rateScalar),
+				"rate_modifier_scalar":     numString(nPool.rateModifierScalar),
+				"utilization_source":       nReserve.utilizationSource,
+			}
+			// Price freshness (audit section 4): the pool oracle's last price
+			// update time and cadence, only when decoded — a price with no
+			// timestamp stays visibly timestamp-less rather than guessed fresh.
+			if oracle, ok := oracleFreshness[pool.OracleContract]; ok {
+				if oracle.LastTimestampRaw != "" {
+					reserveMeta["oracle_timestamp"] = oracle.LastTimestampRaw
+				}
+				if oracle.ResolutionRaw != "" {
+					reserveMeta["oracle_resolution"] = oracle.ResolutionRaw
+				}
+			}
 			output.Reserves = append(output.Reserves, bindings.Reserve{
 				ID:             stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID),
 				Protocol:       a.cfg.Protocol,
@@ -247,47 +331,26 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 				OracleContract: pool.OracleContract,
 				LedgerSeq:      input.LedgerSeq,
 				Timestamp:      input.CloseTime,
-				Metadata: map[string]string{
-					"scalar_version":           nPool.scalarVersion,
-					"asset_symbol":             assetMeta[reserve.AssetID].Symbol,
-					"asset_name":               assetMeta[reserve.AssetID].Name,
-					"asset_decimals":           parseDecimalsInt(nReserve.assetDecimals),
-					"oracle_price_usd":         numString(nReserve.usdPrice),
-					"oracle_price":             numString(nReserve.usdPrice),
-					"b_rate":                   numString(nReserve.bRateRaw.Div(nPool.rateScalar)),
-					"d_rate":                   numString(nReserve.dRateRaw.Div(nPool.rateScalar)),
-					"util_target":              numString(nReserve.utilTargetNormalized),
-					"max_util":                 numString(nReserve.maxUtilNormalized),
-					"r_base":                   numString(nReserve.rBaseNormalized),
-					"r_one":                    numString(nReserve.rOneNormalized),
-					"r_two":                    numString(nReserve.rTwoNormalized),
-					"r_three":                  numString(nReserve.rThreeNormalized),
-					"rate_modifier":            numString(nReserve.rateModifierNormalized),
-					"reactivity":               numString(nReserve.reactivityNormalized),
-					"enabled":                  boolString(reserve.Enabled),
-					"apr_partial":              boolString(nReserve.aprPartial),
-					"pool_balance_raw":         nReserve.raw.PoolBalanceRaw,
-					"remaining_borrowable_raw": numString(nReserve.remainingBorrowableRaw),
-					"rate_scalar":              numString(nPool.rateScalar),
-					"rate_modifier_scalar":     numString(nPool.rateModifierScalar),
-					"utilization_source":       nReserve.utilizationSource,
-				},
+				Metadata:       reserveMeta,
 			})
 
-			// Per-side emission rows: only for a side with an actual on-chain
-			// EmisConfig (EPSRaw != "") — absent emissions stay absent, never a
+			// Per-side emission rows: only for a side with real on-chain emission
+			// state — config (EPSRaw != "") or accrual (IndexRaw != "", the v2
+			// merged ReserveEmissionData) — absent emissions stay absent, never a
 			// fabricated eps=0 row. APY stays "" (no emitted-token price feed
-			// exists yet to derive it); the raw eps/expiration are real decoded
-			// chain state, so a row here is never fabricated.
+			// exists yet to derive it); every raw field is decoded chain state,
+			// so a row here is never fabricated.
 			for _, side := range []struct {
-				name string
-				eps  string
-				exp  string
+				name     string
+				eps      string
+				exp      string
+				index    string
+				lastTime string
 			}{
-				{"supply", reserve.SupplyEmisEPSRaw, reserve.SupplyEmisExpirationRaw},
-				{"borrow", reserve.BorrowEmisEPSRaw, reserve.BorrowEmisExpirationRaw},
+				{"supply", reserve.SupplyEmisEPSRaw, reserve.SupplyEmisExpirationRaw, reserve.SupplyEmisIndexRaw, reserve.SupplyEmisLastTimeRaw},
+				{"borrow", reserve.BorrowEmisEPSRaw, reserve.BorrowEmisExpirationRaw, reserve.BorrowEmisIndexRaw, reserve.BorrowEmisLastTimeRaw},
 			} {
-				if side.eps == "" {
+				if side.eps == "" && side.index == "" {
 					continue
 				}
 				var expiration time.Time
@@ -295,20 +358,172 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 					expiration = unix
 				}
 				output.ReserveEmissions = append(output.ReserveEmissions, bindings.ReserveEmission{
-					ID:         stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID, side.name),
-					Protocol:   a.cfg.Protocol,
-					ContractID: pool.ContractID,
-					AssetID:    reserve.AssetID,
-					Side:       side.name,
-					EPSRaw:     side.eps,
-					Expiration: expiration,
-					APY:        "",
-					LedgerSeq:  input.LedgerSeq,
-					Timestamp:  input.CloseTime,
-					Metadata:   map[string]string{"apy_unavailable": "true"},
+					ID:          stableID(a.cfg.Protocol, pool.ContractID, reserve.AssetID, side.name),
+					Protocol:    a.cfg.Protocol,
+					ContractID:  pool.ContractID,
+					AssetID:     reserve.AssetID,
+					Side:        side.name,
+					EPSRaw:      side.eps,
+					Expiration:  expiration,
+					APY:         "",
+					IndexRaw:    side.index,
+					LastTimeRaw: side.lastTime,
+					LedgerSeq:   input.LedgerSeq,
+					Timestamp:   input.CloseTime,
+					Metadata:    map[string]string{"apy_unavailable": "true"},
 				})
 			}
 		}
+	}
+
+	// Structured auction state: each live Auction(AuctionKey) entry surfaced
+	// verbatim (per-asset lot/bid maps, start block, typed label). The slice in
+	// state is already deterministically sorted by the fold.
+	for _, auction := range input.State.Auctions {
+		typeLabel := auctionTypeLabel(auction.AuctionType)
+		lot := make([]bindings.AuctionAmount, 0, len(auction.Lot))
+		for _, entry := range auction.Lot {
+			lot = append(lot, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
+		}
+		bid := make([]bindings.AuctionAmount, 0, len(auction.Bid))
+		for _, entry := range auction.Bid {
+			bid = append(bid, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
+		}
+		output.Auctions = append(output.Auctions, bindings.Auction{
+			ID:          stableID(a.cfg.Protocol, auction.PoolContractID, auction.UserAddress, typeLabel, "auction"),
+			Protocol:    a.cfg.Protocol,
+			ContractID:  auction.PoolContractID,
+			UserAddress: auction.UserAddress,
+			AuctionType: typeLabel,
+			Block:       auction.Block,
+			Lot:         lot,
+			Bid:         bid,
+			LedgerSeq:   input.LedgerSeq,
+			Timestamp:   input.CloseTime,
+		})
+	}
+
+	// Pending, time-locked reserve-parameter changes (ResInit): the "params
+	// about to change" signal, surfaced verbatim. NewConfig carries only the
+	// fields present on-chain. The slice in state is deterministically sorted.
+	for _, queued := range input.State.QueuedReserves {
+		var unlockTime time.Time
+		if unix, ok := parseUnixSeconds(queued.UnlockTimeRaw); ok {
+			unlockTime = unix
+		}
+		newConfig := map[string]string{}
+		for key, value := range map[string]string{
+			"index":      queued.NewConfig.IndexRaw,
+			"decimals":   queued.NewConfig.DecimalsRaw,
+			"c_factor":   queued.NewConfig.CFactorRaw,
+			"l_factor":   queued.NewConfig.LFactorRaw,
+			"util":       queued.NewConfig.UtilRaw,
+			"max_util":   queued.NewConfig.MaxUtilRaw,
+			"r_base":     queued.NewConfig.RBaseRaw,
+			"r_one":      queued.NewConfig.ROneRaw,
+			"r_two":      queued.NewConfig.RTwoRaw,
+			"r_three":    queued.NewConfig.RThreeRaw,
+			"reactivity": queued.NewConfig.ReactivityRaw,
+			"supply_cap": queued.NewConfig.SupplyCapRaw,
+			"enabled":    queued.NewConfig.Enabled,
+		} {
+			if value != "" {
+				newConfig[key] = value
+			}
+		}
+		output.QueuedReserves = append(output.QueuedReserves, bindings.QueuedReserve{
+			ID:            stableID(a.cfg.Protocol, queued.PoolContractID, queued.AssetID, "queued_reserve"),
+			Protocol:      a.cfg.Protocol,
+			ContractID:    queued.PoolContractID,
+			AssetID:       queued.AssetID,
+			UnlockTimeRaw: queued.UnlockTimeRaw,
+			UnlockTime:    unlockTime,
+			NewConfig:     newConfig,
+			LedgerSeq:     input.LedgerSeq,
+			Timestamp:     input.CloseTime,
+		})
+	}
+
+	// The backstop contract's decoded identity: a Contract row (gold's
+	// contract_type 'backstop') carrying the instance addresses — BToken is
+	// the Comet LP anchoring share valuation — plus reward-zone membership and
+	// drop list as canonical JSON. Only fields present on-chain are emitted.
+	for _, instance := range input.State.BackstopInstances {
+		meta := map[string]string{}
+		for key, value := range map[string]string{
+			"backstop_token": instance.BackstopToken,
+			"blnd_token":     instance.BLNDToken,
+			"usdc_token":     instance.USDCToken,
+			"emitter":        instance.Emitter,
+			"pool_factory":   instance.PoolFactory,
+		} {
+			if value != "" {
+				meta[key] = value
+			}
+		}
+		if len(instance.RewardZone) > 0 {
+			if raw, err := json.Marshal(instance.RewardZone); err == nil {
+				meta["reward_zone"] = string(raw)
+			}
+		}
+		if len(instance.DropList) > 0 {
+			drop := make(map[string]string, len(instance.DropList))
+			for _, entry := range instance.DropList {
+				drop[entry.Address] = entry.AmountRaw
+			}
+			if raw, err := json.Marshal(drop); err == nil {
+				meta["drop_list"] = string(raw)
+			}
+		}
+		output.Contracts = append(output.Contracts, bindings.Contract{
+			ID:              stableID(a.cfg.Protocol, instance.ContractID),
+			Address:         instance.ContractID,
+			Protocol:        a.cfg.Protocol,
+			ContractType:    "backstop",
+			Status:          "active",
+			FirstSeenLedger: input.LedgerSeq,
+			LastSeenLedger:  input.LedgerSeq,
+			Metadata:        meta,
+		})
+	}
+
+	// Per-user reserve emission accrual: each UserEmis(UserReserveKey) entry
+	// surfaced with its side and — when the pool's reserve list resolves the
+	// index — its asset. AssetID stays "" (never guessed) when unresolvable;
+	// the raw ReserveTokenID always rides along. The relay#26 consumer derives
+	// claimable BLND from (index, accrued) against the reserve's own emission
+	// index. The slice in state is already deterministically sorted.
+	for _, emission := range input.State.UserEmissions {
+		side := "borrow"
+		if emission.ReserveTokenID%2 == 1 {
+			side = "supply"
+		}
+		assetID := ""
+		for _, pool := range input.State.Pools {
+			if pool.ContractID != emission.PoolContractID {
+				continue
+			}
+			for _, reserve := range pool.Reserves {
+				if reserve.ReserveIndex == emission.ReserveTokenID/2 {
+					assetID = reserve.AssetID
+					break
+				}
+			}
+			break
+		}
+		output.UserEmissions = append(output.UserEmissions, bindings.UserEmission{
+			ID:             stableID(a.cfg.Protocol, emission.Address, emission.PoolContractID, strconv.FormatInt(int64(emission.ReserveTokenID), 10), "user_emission"),
+			Protocol:       a.cfg.Protocol,
+			ContractID:     emission.PoolContractID,
+			Address:        emission.Address,
+			AssetID:        assetID,
+			ReserveTokenID: emission.ReserveTokenID,
+			Side:           side,
+			IndexRaw:       emission.IndexRaw,
+			AccruedRaw:     emission.AccruedRaw,
+			LedgerSeq:      input.LedgerSeq,
+			Timestamp:      input.CloseTime,
+		})
 	}
 
 	// Activities are valued at the same folded oracle price the reserve itself
@@ -640,6 +855,11 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		}
 		if q4wUnlockAt != nil {
 			pos.Metadata["q4w_unlock_at"] = q4wUnlockAt.Format(time.RFC3339)
+		}
+		if backstop.EmisIndexRaw != "" {
+			// The UEmisData checkpoint index behind unclaimed_emissions; only
+			// present when the accrual entry exists on-chain.
+			pos.Metadata["emission_index"] = backstop.EmisIndexRaw
 		}
 		output.Positions = append(output.Positions, pos)
 
@@ -1081,6 +1301,22 @@ func reserveKey(poolContract, assetID string) string {
 
 func parseDecimalsInt(v int32) string {
 	return strconv.FormatInt(int64(v), 10)
+}
+
+// auctionTypeLabel maps the contract's AuctionType enum to its label form.
+// An out-of-range value stays visible as its number — never silently coerced
+// to a known type.
+func auctionTypeLabel(auctType int32) string {
+	switch auctType {
+	case 0:
+		return "user_liquidation"
+	case 1:
+		return "bad_debt"
+	case 2:
+		return "interest"
+	default:
+		return strconv.FormatInt(int64(auctType), 10)
+	}
 }
 
 func boolString(v bool) string {

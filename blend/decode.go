@@ -26,6 +26,7 @@ type decodedEvent struct {
 	shareRaw     string
 	direction    string
 	reason       string
+	counterparty string
 	metadata     map[string]string
 }
 
@@ -69,11 +70,29 @@ func decodeEvent(evt bindings.RawEventEnvelope) decodedEvent {
 		if out.address == "" {
 			out.address = wallet
 		}
-		if out.assetID == "" {
+		// Auction events span multiple assets (per-asset lot/bid maps carried in
+		// metadata), so a single AssetID would misattribute them — and the
+		// auctioned user may itself be a contract (interest auctions), which this
+		// heuristic would misread as the asset.
+		if out.assetID == "" && !isAuctionActivity(out.activityType) {
 			out.assetID = asset
 		}
 	}
+	// The exact contract event symbol, preserved even for legacy names whose
+	// activity type differs from it (deposit-era fixtures, reserve_config).
+	if out.eventName != "" {
+		out.metadata["event_name"] = out.eventName
+	}
 	return out
+}
+
+func isAuctionActivity(a contracts.ActivityType) bool {
+	switch a {
+	case contracts.ActivityTypeNewAuction, contracts.ActivityTypeFillAuction, contracts.ActivityTypeDeleteAuction:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeFixturePayload(raw []byte) decodedEvent {
@@ -113,6 +132,27 @@ func decodeTopicJSON(topic string) decodedEvent {
 	act := classifyEventName(eventName)
 	if act == "" {
 		return decodedEvent{}
+	}
+	if isAuctionActivity(act) {
+		// Auction topics are [event, auction_type: u32, user]; the only address
+		// there is the auctioned user. Amounts and assets are multi-asset
+		// (per-asset lot/bid) and come from the XDR path's structured decode —
+		// the generic scans below would misfile the auctioned user as the asset
+		// (interest auctions auction the backstop, a contract) and the percent
+		// as the amount.
+		wallet := ""
+		for _, val := range rawTopics[1:] {
+			if s := jsonString(val); validActorAddress(s) {
+				wallet = s
+				break
+			}
+		}
+		return decodedEvent{
+			eventName:    eventName,
+			activityType: act,
+			address:      wallet,
+			direction:    directionForActivity(act),
+		}
 	}
 	wallet := ""
 	asset := ""
@@ -215,11 +255,24 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 			addresses = append(addresses, addr)
 		}
 	}
+	act := classifyEventName(eventName)
+	if act == "" {
+		return decodedEvent{}
+	}
+	if isAuctionActivity(act) {
+		return decodeAuctionEventXDR(eventName, act, v0)
+	}
 	if len(addresses) > 0 && validContractAddress(addresses[0]) {
 		asset = addresses[0]
 	}
 	if len(addresses) > 1 && validActorAddress(addresses[1]) {
 		wallet = addresses[1]
+	}
+	if wallet == "" && len(addresses) > 0 && !validContractAddress(addresses[0]) && validAccountAddress(addresses[0]) {
+		// Events like claim carry only the actor in their topics ([claim,
+		// from]): an account in the first address slot can never be the asset
+		// (assets are contracts), so it is the wallet.
+		wallet = addresses[0]
 	}
 	dataWallet, dataAsset := collectScValAddresses(v0.Data)
 	if wallet == "" {
@@ -227,10 +280,6 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	}
 	if asset == "" {
 		asset = dataAsset
-	}
-	act := classifyEventName(eventName)
-	if act == "" {
-		return decodedEvent{}
 	}
 	numbers := scValNumerics(v0.Data)
 	amount := ""
@@ -241,6 +290,13 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 	if len(numbers) > 1 {
 		share = numbers[1]
 	}
+	if act == contracts.ActivityTypeClaim && len(numbers) > 0 {
+		// claim data is (reserve_token_ids: Vec<u32>, amount_claimed: i128), so
+		// the first numeric is a reserve token ID, not the amount — the claimed
+		// amount is the trailing scalar. There is no share quantity here.
+		amount = numbers[len(numbers)-1]
+		share = ""
+	}
 	return decodedEvent{
 		eventName:    strings.ToLower(strings.TrimSpace(eventName)),
 		activityType: act,
@@ -250,6 +306,96 @@ func decodeContractEventXDR(raw []byte) decodedEvent {
 		shareRaw:     share,
 		direction:    directionForActivity(act),
 	}
+}
+
+// decodeAuctionEventXDR is the structured decode for new_auction /
+// fill_auction / delete_auction contract events. Topics are [symbol,
+// auction_type: u32, user: Address] — the auctioned user is the activity
+// address. Data varies by event: fill carries (filler, fill_percent,
+// AuctionData) so the filler lands as the counterparty (the liquidation's
+// second party, previously collapsed away); new carries (percent,
+// AuctionData); delete carries unit. The AuctionData lot/bid maps are
+// per-asset, so no single AssetID/AmountRaw is fabricated — the full maps
+// ride in metadata (auction_lot / auction_bid, canonical sorted-key JSON)
+// alongside auction_type, auction_block and the percent. Any piece that
+// fails to decode is simply absent from metadata, never guessed.
+func decodeAuctionEventXDR(eventName string, act contracts.ActivityType, v0 xdr.ContractEventV0) decodedEvent {
+	out := decodedEvent{
+		eventName:    strings.ToLower(strings.TrimSpace(eventName)),
+		activityType: act,
+		direction:    directionForActivity(act),
+		metadata:     map[string]string{},
+	}
+	for _, topic := range v0.Topics[1:] {
+		if _, tagged := out.metadata["auction_type"]; !tagged && topic.Type == xdr.ScValTypeScvU32 {
+			if auctType, ok := scInt32(topic); ok {
+				out.metadata["auction_type"] = auctionTypeLabel(auctType)
+				continue
+			}
+		}
+		if out.address == "" {
+			if addr := scValAddress(topic); addr != "" {
+				out.address = addr
+			}
+		}
+	}
+	elems := []xdr.ScVal{v0.Data}
+	if vec, ok := scVec(v0.Data); ok {
+		elems = vec
+	}
+	for _, elem := range elems {
+		if addr := scValAddress(elem); addr != "" {
+			if out.counterparty == "" {
+				out.counterparty = addr
+			}
+			continue
+		}
+		if fields := scMapFields(elem); fields != nil {
+			mergeAuctionDataMetadata(out.metadata, fields)
+			continue
+		}
+		if n, ok := scIntString(elem); ok {
+			key := "auction_percent"
+			if act == contracts.ActivityTypeFillAuction {
+				key = "fill_percent"
+			}
+			if _, exists := out.metadata[key]; !exists {
+				out.metadata[key] = n
+			}
+		}
+	}
+	return out
+}
+
+// mergeAuctionDataMetadata surfaces an event-embedded AuctionData struct
+// ({bid, lot, block}) into activity metadata. Each piece is independent: a
+// malformed lot map drops only auction_lot, it does not take block or bid
+// with it.
+func mergeAuctionDataMetadata(metadata map[string]string, fields map[string]xdr.ScVal) {
+	if block, ok := fieldIntString(fields, "block"); ok {
+		metadata["auction_block"] = block
+	}
+	if lot, ok := decodeAuctionEntries(fields["lot"]); ok {
+		metadata["auction_lot"] = auctionEntriesJSON(lot)
+	}
+	if bid, ok := decodeAuctionEntries(fields["bid"]); ok {
+		metadata["auction_bid"] = auctionEntriesJSON(bid)
+	}
+}
+
+// auctionEntriesJSON renders lot/bid entries as canonical JSON — a
+// {asset: amount} object whose keys json.Marshal sorts, so the same map is
+// byte-identical run to run.
+func auctionEntriesJSON(entries []contracts.AuctionEntry) string {
+	m := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		m[entry.AssetID] = entry.AmountRaw
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func looksBlend(evt bindings.RawEventEnvelope) bool {
@@ -536,6 +682,9 @@ func mergeDecoded(target *decodedEvent, src decodedEvent) {
 	}
 	if src.direction != "" {
 		target.direction = src.direction
+	}
+	if src.counterparty != "" {
+		target.counterparty = src.counterparty
 	}
 	for k, v := range src.metadata {
 		target.metadata[k] = v

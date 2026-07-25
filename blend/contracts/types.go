@@ -64,7 +64,23 @@ type PoolState struct {
 	WasmHash         string
 	PoolStatus       string
 	BackstopTakeRate string
-	Reserves         []ReserveState
+	// Pool instance-storage identity (decode-gap audit section 3): the on-chain
+	// display Name (the authoritative value the API's registry-sourced
+	// pool_name diverges from), the pool Admin address, and the pool-level BLND
+	// token address. Empty when absent on-chain.
+	Name      string
+	Admin     string
+	BLNDToken string
+	// PoolConfig's remaining fields: max effective positions per user (u32) and
+	// the minimum collateral (i128, oracle units) to open any liability. Raw
+	// strings, empty when absent — never a fabricated "0".
+	MaxPositionsRaw  string
+	MinCollateralRaw string
+	// PoolEmissions is the pool's PoolEmis entry: the per-reserve-token BLND
+	// emission share split (res_token_id -> share, 7-dp fraction of 1e7).
+	// Sorted by ReserveTokenID; nil when the entry is absent on-chain.
+	PoolEmissions []PoolEmissionEntry
+	Reserves      []ReserveState
 	// Backstop pool-level balance: the totals from this pool's PoolBalance entry
 	// in the backstop contract (total LP shares/tokens deposited against the
 	// pool, and the aggregate shares currently queued for withdrawal). These ride
@@ -74,6 +90,15 @@ type PoolState struct {
 	BackstopSharesRaw    string
 	BackstopTokensRaw    string
 	BackstopQ4WSharesRaw string
+	// Backstop pool-level emission accrual: the backstop contract's
+	// BEmisData(pool) entry (BackstopEmissionData {expiration, eps, index,
+	// last_time}), riding on PoolState for the same carry reason as the balance
+	// fields above. Empty string means the entry (or that field) is absent
+	// on-chain — emissions not activated — never a fabricated "0".
+	BackstopEmisEPSRaw        string
+	BackstopEmisExpirationRaw string
+	BackstopEmisIndexRaw      string
+	BackstopEmisLastTimeRaw   string
 }
 
 type ReserveState struct {
@@ -118,6 +143,13 @@ type ReserveState struct {
 	BorrowEmisExpirationRaw string
 	BorrowEmisIndexRaw      string
 	BorrowEmisLastTimeRaw   string
+	// BackstopCreditRaw is ResData's backstop_credit — underlying accrued to the
+	// backstop (protocol take on debt interest) but not yet gulped. It directly
+	// reduces true available liquidity. LastTimeRaw is ResData's last_time — the
+	// unix second the reserve's rates last accrued, letting a consumer reproduce
+	// interest to now deterministically. Both empty when absent on-chain.
+	BackstopCreditRaw string
+	LastTimeRaw       string
 	// Archived marks a reserve whose ResConfig/ResData entry went not-live via
 	// TTL lapse or network-level eviction rather than an explicit on-chain
 	// delete. The reserve (and its reserveByIndex slot) is kept rather than
@@ -146,19 +178,128 @@ type UserReservePosition struct {
 	ArchivedLedgerSeq int64
 }
 
+// PoolEmissionEntry is one reserve token's share of the pool's BLND emission
+// split (the PoolEmis Map<u32, u64> entry). ShareRaw is a 7-dp fraction of
+// 1e7 (15% = "1500000").
+type PoolEmissionEntry struct {
+	ReserveTokenID int32
+	ShareRaw       string
+}
+
+// QueuedReserveState is one pending, time-locked reserve-parameter change:
+// the pool's ResInit(Address) entry (QueuedReserveInit {new_config,
+// unlock_time}) — the "params about to change" signal, previously entirely
+// undecoded. It is deliberately NOT folded into the pool's live reserves: the
+// queued config takes effect only when set_reserve executes after
+// unlock_time. NewConfig carries the queued ReserveConfig verbatim as raw
+// strings ("" = field absent on-chain, Enabled "true"/"false"/"" likewise).
+type QueuedReserveState struct {
+	PoolContractID string
+	AssetID        string
+	UnlockTimeRaw  string
+	NewConfig      QueuedReserveConfig
+}
+
+// QueuedReserveConfig mirrors the on-chain ReserveConfig inside a
+// QueuedReserveInit, every field raw and independently optional.
+type QueuedReserveConfig struct {
+	IndexRaw      string
+	DecimalsRaw   string
+	CFactorRaw    string
+	LFactorRaw    string
+	UtilRaw       string
+	MaxUtilRaw    string
+	RBaseRaw      string
+	ROneRaw       string
+	RTwoRaw       string
+	RThreeRaw     string
+	ReactivityRaw string
+	SupplyCapRaw  string
+	Enabled       string // "true" / "false" / "" when absent
+}
+
+// BackstopInstanceState is the backstop contract's decoded identity: the
+// instance-storage addresses (BToken — the Comet LP anchoring share
+// valuation — BLNDTkn, USDCTkn, Emitter, PoolFact) plus the top-level RZ
+// (reward-zone membership: which pools earn emissions at all) and DropList
+// persistent entries. Carried in LedgerState because the instance is written
+// at deploy and rarely re-emitted — the same carry requirement as
+// OracleState. Empty/nil fields mean absent on-chain.
+type BackstopInstanceState struct {
+	ContractID    string
+	BackstopToken string // BToken: the Comet LP (backstop token) address
+	BLNDToken     string
+	USDCToken     string
+	Emitter       string
+	PoolFactory   string
+	RewardZone    []string
+	DropList      []DropListEntry
+}
+
+// DropListEntry is one (Address, i128) pair of the backstop's DropList.
+type DropListEntry struct {
+	Address   string
+	AmountRaw string
+}
+
+// AuctionState is one live auction's decoded on-chain state: the pool's
+// Auction(AuctionKey{user, auct_type}) temporary entry (AuctionData {bid, lot,
+// block}). AuctionType follows the contract's enum: 0 = user_liquidation,
+// 1 = bad_debt, 2 = interest. Lot and Bid are the full per-asset maps, sorted
+// by asset for deterministic output; their unit depends on the auction type
+// (see the contract's AuctionData docs — e.g. a user liquidation's lot is
+// bTokens and bid is dTokens). The entry is temporary storage: when it goes
+// not-live on-chain (filled, deleted, or TTL-lapsed) the auction is gone.
+type AuctionState struct {
+	PoolContractID string
+	UserAddress    string
+	AuctionType    int32
+	Block          int64
+	Lot            []AuctionEntry
+	Bid            []AuctionEntry
+}
+
+// AuctionEntry is one asset's amount within an auction's lot or bid map.
+type AuctionEntry struct {
+	AssetID   string
+	AmountRaw string
+}
+
+// UserEmissionState is one user's per-reserve-token emission accrual: the
+// pool's UserEmis(UserReserveKey{user, reserve_id}) entry (UserEmissionData
+// {index, accrued}). ReserveTokenID is the contract's res_token_id
+// (reserve_index*2 + side; side 1 = supply/b-token, 0 = borrow/d-token), kept
+// raw so the entry survives even when the reserve list is not yet known;
+// asset/side resolution happens at transform time. AccruedRaw is the user's
+// checkpointed unclaimed BLND for that reserve token. Both fields are decoded
+// verbatim; an absent entry is absent from the slice, never zero-filled.
+type UserEmissionState struct {
+	Address        string
+	PoolContractID string
+	ReserveTokenID int32
+	IndexRaw       string
+	AccruedRaw     string
+}
+
 type Q4WEntry struct {
 	SharesRaw string
 	UnlockAt  time.Time
 }
 
 type BackstopPosition struct {
-	Address               string
-	PoolContractID        string
-	UserSharesRaw         string
-	PoolSharesRaw         string
-	PoolTokensRaw         string
-	Q4W                   []Q4WEntry
+	Address        string
+	PoolContractID string
+	UserSharesRaw  string
+	PoolSharesRaw  string
+	PoolTokensRaw  string
+	Q4W            []Q4WEntry
+	// UnclaimedEmissionsRaw is the backstop contract's UEmisData(pool, user)
+	// accrued value — the user's checkpointed, not-yet-claimed backstop BLND.
+	// EmisIndexRaw is the same entry's index (the user's last accrued emission
+	// index, 14 decimals). Both empty when the entry is absent on-chain —
+	// emissions not activated or nothing accrued — never a fabricated "0".
 	UnclaimedEmissionsRaw string
+	EmisIndexRaw          string
 	LPTokenSupplyRaw      string
 	LPBLNDReserveRaw      string
 	LPUSDCReserveRaw      string
@@ -179,6 +320,16 @@ type OracleState struct {
 	Decimals   int32
 	Assets     []OracleAssetIndex
 	Prices     []OracleIndexPrice
+	// Instance-storage facets beyond the asset list (decode-gap audit section
+	// 4): the quote asset every price is denominated in (canonical SEP-40 key,
+	// "stellar:<C...>" / "other:<SYM>"), the update cadence in seconds, and the
+	// oracle admin. LastTimestampRaw is the oracle's top-level `timestamp`
+	// entry — the last-price-update unix time, the price-freshness signal.
+	// All empty when absent on-chain.
+	BaseKey          string
+	ResolutionRaw    string
+	Admin            string
+	LastTimestampRaw string
 }
 
 // OracleAssetIndex binds one asset to its index in the oracle's asset list. The

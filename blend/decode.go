@@ -259,6 +259,7 @@ func looksBlend(evt bindings.RawEventEnvelope) bool {
 	s := strings.ToLower(evt.ContractID + " " + evt.Topic)
 	keys := []string{
 		"blend", "pool", "backstop", "supply", "borrow", "repay", "withdraw", "liquid", "emission", "flash",
+		"auction", "gulp", "defaulted_debt",
 	}
 	for _, k := range keys {
 		if strings.Contains(s, k) {
@@ -268,40 +269,101 @@ func looksBlend(evt bindings.RawEventEnvelope) bool {
 	return false
 }
 
+// exactEventActivities maps every blend-contracts-v2 pool event symbol to an
+// activity type carrying the exact on-chain name. This replaced a substring
+// keyword matcher that silently dropped the auction and emission events
+// (fill_auction — the on-chain shape of a liquidation — new_auction,
+// delete_auction, gulp_emissions, reserve_emission_update, gulp, defaulted_debt,
+// set_admin, update_pool, ...) and misfiled others (supply → deposit,
+// set_reserve → contract_status_change). The names must stay in lock-step with
+// gold's activity_type enum (relay migration 017, relay.lightgate.xyz#65/#75).
+// The auction subtype (user_liquidation / bad_debt / interest) is a u32 topic
+// discriminator in v2, not part of the event symbol.
+var exactEventActivities = map[string]contracts.ActivityType{
+	"supply":                  contracts.ActivityTypeSupply,
+	"withdraw":                contracts.ActivityTypeWithdraw,
+	"supply_collateral":       contracts.ActivityTypeSupplyCollateral,
+	"withdraw_collateral":     contracts.ActivityTypeWithdrawCollateral,
+	"borrow":                  contracts.ActivityTypeBorrow,
+	"repay":                   contracts.ActivityTypeRepay,
+	"flash_loan":              contracts.ActivityTypeFlashLoan,
+	"claim":                   contracts.ActivityTypeClaim,
+	"new_auction":             contracts.ActivityTypeNewAuction,
+	"fill_auction":            contracts.ActivityTypeFillAuction,
+	"delete_auction":          contracts.ActivityTypeDeleteAuction,
+	"set_status":              contracts.ActivityTypeSetStatus,
+	"set_reserve":             contracts.ActivityTypeSetReserve,
+	"queue_set_reserve":       contracts.ActivityTypeQueueSetReserve,
+	"cancel_set_reserve":      contracts.ActivityTypeCancelSetReserve,
+	"update_pool":             contracts.ActivityTypeUpdatePool,
+	"set_admin":               contracts.ActivityTypeSetAdmin,
+	"gulp":                    contracts.ActivityTypeGulp,
+	"gulp_emissions":          contracts.ActivityTypeGulpEmissions,
+	"reserve_emission_update": contracts.ActivityTypeReserveEmissionUpdate,
+	"defaulted_debt":          contracts.ActivityTypeDefaultedDebt,
+}
+
+// legacyEventActivities keeps the pre-exact vocabulary decoding: fixture and
+// synthetic events name activities by legacy type directly, and the v1-era
+// reserve_config lifecycle event keeps its contract_status_change identity.
+var legacyEventActivities = map[string]contracts.ActivityType{
+	"deposit":                contracts.ActivityTypeDeposit,
+	"liquidation":            contracts.ActivityTypeLiquidation,
+	"claim_rewards":          contracts.ActivityTypeClaimRewards,
+	"bad_debt":               contracts.ActivityTypeBadDebt,
+	"baddebt":                contracts.ActivityTypeBadDebt,
+	"reserve_config":         contracts.ActivityTypeStatusChange,
+	"contract_status_change": contracts.ActivityTypeStatusChange,
+}
+
 func classifyEventName(name string) contracts.ActivityType {
 	s := strings.ToLower(strings.TrimSpace(name))
-	switch {
-	case strings.Contains(s, "supply"), strings.Contains(s, "deposit"):
-		return contracts.ActivityTypeDeposit
-	case strings.Contains(s, "withdraw"):
-		return contracts.ActivityTypeWithdraw
-	case strings.Contains(s, "borrow"):
-		return contracts.ActivityTypeBorrow
-	case strings.Contains(s, "repay"):
-		return contracts.ActivityTypeRepay
-	case strings.Contains(s, "liquid"):
-		return contracts.ActivityTypeLiquidation
-	case strings.Contains(s, "claim"):
-		return contracts.ActivityTypeClaimRewards
-	case strings.Contains(s, "flash"):
-		return contracts.ActivityTypeFlashLoan
-	case strings.Contains(s, "bad_debt"), strings.Contains(s, "baddebt"):
-		return contracts.ActivityTypeBadDebt
-	case strings.Contains(s, "status"), strings.Contains(s, "reserve_config"), strings.Contains(s, "set_reserve"):
-		return contracts.ActivityTypeStatusChange
-	default:
-		return ""
+	if act, ok := exactEventActivities[s]; ok {
+		return act
 	}
+	if act, ok := legacyEventActivities[s]; ok {
+		return act
+	}
+	return ""
 }
 
 func directionForActivity(a contracts.ActivityType) string {
 	switch a {
-	case contracts.ActivityTypeDeposit, contracts.ActivityTypeRepay, contracts.ActivityTypeClaimRewards:
+	case contracts.ActivityTypeDeposit, contracts.ActivityTypeRepay, contracts.ActivityTypeClaimRewards,
+		contracts.ActivityTypeSupply, contracts.ActivityTypeSupplyCollateral, contracts.ActivityTypeClaim:
 		return "in"
-	case contracts.ActivityTypeWithdraw, contracts.ActivityTypeBorrow:
+	case contracts.ActivityTypeWithdraw, contracts.ActivityTypeBorrow, contracts.ActivityTypeWithdrawCollateral:
 		return "out"
 	default:
 		return "neutral"
+	}
+}
+
+// contractScopedActivity reports whether an activity type is a pool-lifecycle
+// fact with no guaranteed wallet actor in the event (set_status from the
+// permissionless update_status path, gulp_emissions, reserve_emission_update,
+// gulp, defaulted_debt carry no address at all; the admin-triggered config
+// events may). For these the adapter falls back to the emitting contract as
+// the activity address instead of quarantining on missing_activity_address —
+// the same fallback contract_status_change always had. Auction events are
+// excluded: they always carry the auctioned user in their topics, so a missing
+// address there is a real decode failure.
+func contractScopedActivity(a contracts.ActivityType) bool {
+	switch a {
+	case contracts.ActivityTypeStatusChange,
+		contracts.ActivityTypeSetStatus,
+		contracts.ActivityTypeSetReserve,
+		contracts.ActivityTypeQueueSetReserve,
+		contracts.ActivityTypeCancelSetReserve,
+		contracts.ActivityTypeUpdatePool,
+		contracts.ActivityTypeSetAdmin,
+		contracts.ActivityTypeGulp,
+		contracts.ActivityTypeGulpEmissions,
+		contracts.ActivityTypeReserveEmissionUpdate,
+		contracts.ActivityTypeDefaultedDebt:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -316,7 +378,9 @@ func shareTypeForEvent(eventName string, a contracts.ActivityType) string {
 		return string(contracts.PositionTypeCollateral)
 	}
 	switch a {
-	case contracts.ActivityTypeDeposit, contracts.ActivityTypeWithdraw:
+	case contracts.ActivityTypeSupplyCollateral, contracts.ActivityTypeWithdrawCollateral:
+		return string(contracts.PositionTypeCollateral)
+	case contracts.ActivityTypeDeposit, contracts.ActivityTypeWithdraw, contracts.ActivityTypeSupply:
 		return string(contracts.PositionTypeSupply)
 	case contracts.ActivityTypeBorrow, contracts.ActivityTypeRepay:
 		return string(contracts.PositionTypeLiability)

@@ -424,6 +424,10 @@ func TestLifecycleStatusEventPreservesContractIdentity(t *testing.T) {
 // The raw event here deliberately carries a real tx hash and a NON-zero event
 // index (the exact shape that crash-looped the live testnet fold at ledger
 // 3289013) — the adapter must overwrite both with the synthetic identity.
+// Only the legacy contract_status_change vocabulary gets this coercion: since
+// the exact-name classifier (relay#65/#75), v2 lifecycle events like
+// set_reserve keep their own type and raw identity (see
+// TestSetReserveKeepsExactTypeAndRawIdentity).
 func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -433,7 +437,7 @@ func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
 	}
 	contractID := validContractString(t, 61)
 	const ledger = int64(3289013)
-	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "set_reserve")}, i128Val(1))
+	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "reserve_config")}, i128Val(1))
 
 	out, err := adapter.Transform(bindings.TransformInput{
 		LedgerSeq: ledger,
@@ -443,7 +447,7 @@ func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
 			TxHash:     "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e",
 			EventIndex: 3,
 			ContractID: contractID,
-			Topic:      `{"topics":["set_reserve"]}`,
+			Topic:      `{"topics":["reserve_config"]}`,
 			RawEvent:   raw,
 			CloseTime:  time.Unix(42, 0).UTC(),
 			Metadata:   map[string]string{"protocol_id": "blend"},
@@ -477,6 +481,58 @@ func TestStatusChangeSatisfiesLifecycleSyntheticIdentity(t *testing.T) {
 	// Non-status activities must keep the raw event's identity untouched.
 	if statusChangeTxHash(contractID, ledger) != wantTxHash {
 		t.Fatalf("helper drift: %s != %s", statusChangeTxHash(contractID, ledger), wantTxHash)
+	}
+}
+
+// TestSetReserveKeepsExactTypeAndRawIdentity pins the flip side of the golden
+// fixture above: a v2 set_reserve event — which the substring classifier used
+// to coerce to contract_status_change plus synthetic identity — now stores
+// under its exact name with the raw event's tx hash and index, and falls back
+// to the emitting contract as address when the event carries no actor.
+func TestSetReserveKeepsExactTypeAndRawIdentity(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := New(DefaultConfig())
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	contractID := validContractString(t, 62)
+	const ledger = int64(3289013)
+	const txHash = "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e"
+	raw := contractEventRaw(t, []xdr.ScVal{symbolVal(t, "set_reserve")}, i128Val(1))
+
+	out, err := adapter.Transform(bindings.TransformInput{
+		LedgerSeq: ledger,
+		CloseTime: time.Unix(42, 0).UTC(),
+		Events: []bindings.RawEventEnvelope{{
+			LedgerSeq:  ledger,
+			TxHash:     txHash,
+			EventIndex: 3,
+			ContractID: contractID,
+			Topic:      `{"topics":["set_reserve"]}`,
+			RawEvent:   raw,
+			CloseTime:  time.Unix(42, 0).UTC(),
+			Metadata:   map[string]string{"protocol_id": "blend"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Quarantine) != 0 {
+		t.Fatalf("expected no quarantine, got %+v", out.Quarantine)
+	}
+	if len(out.Activities) != 1 {
+		t.Fatalf("expected one activity, got %d", len(out.Activities))
+	}
+	got := out.Activities[0]
+	if got.ActivityType != contracts.ActivityTypeSetReserve {
+		t.Fatalf("expected %s, got %s", contracts.ActivityTypeSetReserve, got.ActivityType)
+	}
+	if got.TxHash != txHash || got.EventIndex != 3 {
+		t.Fatalf("expected raw identity %s/3, got %s/%d", txHash, got.TxHash, got.EventIndex)
+	}
+	if got.Address != contractID {
+		t.Fatalf("expected contract fallback address %s, got %s", contractID, got.Address)
 	}
 }
 

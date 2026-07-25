@@ -30,6 +30,33 @@ const (
 	ActivityTypeStatusChange ActivityType = "contract_status_change"
 )
 
+// Exact blend-contracts-v2 pool event names, carried verbatim as activity
+// types. These are the values relay migration 017 added to gold's
+// activity_type enum (relay.lightgate.xyz#65/#75) — the two vocabularies must
+// stay identical or relay's normalizeActivityType coerces the row to
+// contract_status_change and the insert fails gold's
+// lifecycle_synthetic_identity CHECK. The v2 events withdraw, borrow, repay
+// and flash_loan share their spelling with the legacy constants above.
+const (
+	ActivityTypeSupply                ActivityType = "supply"
+	ActivityTypeSupplyCollateral      ActivityType = "supply_collateral"
+	ActivityTypeWithdrawCollateral    ActivityType = "withdraw_collateral"
+	ActivityTypeClaim                 ActivityType = "claim"
+	ActivityTypeNewAuction            ActivityType = "new_auction"
+	ActivityTypeFillAuction           ActivityType = "fill_auction"
+	ActivityTypeDeleteAuction         ActivityType = "delete_auction"
+	ActivityTypeSetStatus             ActivityType = "set_status"
+	ActivityTypeSetReserve            ActivityType = "set_reserve"
+	ActivityTypeQueueSetReserve       ActivityType = "queue_set_reserve"
+	ActivityTypeCancelSetReserve      ActivityType = "cancel_set_reserve"
+	ActivityTypeUpdatePool            ActivityType = "update_pool"
+	ActivityTypeSetAdmin              ActivityType = "set_admin"
+	ActivityTypeGulp                  ActivityType = "gulp"
+	ActivityTypeGulpEmissions         ActivityType = "gulp_emissions"
+	ActivityTypeReserveEmissionUpdate ActivityType = "reserve_emission_update"
+	ActivityTypeDefaultedDebt         ActivityType = "defaulted_debt"
+)
+
 type PoolState struct {
 	ContractID       string
 	BackstopContract string

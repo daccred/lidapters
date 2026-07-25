@@ -148,7 +148,7 @@ func (a *Adapter) Transform(input bindings.TransformInput) (*bindings.TransformO
 			})
 			continue
 		}
-		if decoded.activityType == contracts.ActivityTypeStatusChange && decoded.address == "" {
+		if contractScopedActivity(decoded.activityType) && decoded.address == "" {
 			decoded.address = evt.ContractID
 		}
 		if reason := activityIdentityFailure(decoded, evt); reason != "" {

@@ -843,15 +843,24 @@ func TestDecodeState_PreexistingDecodeUnchanged(t *testing.T) {
 		"NewBackstopEmisIdx":  {pool.BackstopEmisIndexRaw, ""},
 		"NewBackstopEmisExp":  {pool.BackstopEmisExpirationRaw, ""},
 		"NewBackstopEmisLast": {pool.BackstopEmisLastTimeRaw, ""},
+		"NewPoolName":         {pool.Name, ""},
+		"NewPoolAdmin":        {pool.Admin, ""},
+		"NewPoolBLNDToken":    {pool.BLNDToken, ""},
+		"NewMaxPositions":     {pool.MaxPositionsRaw, ""},
+		"NewMinCollateral":    {pool.MinCollateralRaw, ""},
 	}
 	for name, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", name, c.got, c.want)
 		}
 	}
-	if len(state.Auctions) != 0 || len(state.UserEmissions) != 0 {
-		t.Fatalf("new slices fabricated entries: auctions=%d userEmissions=%d",
-			len(state.Auctions), len(state.UserEmissions))
+	if len(state.Auctions) != 0 || len(state.UserEmissions) != 0 ||
+		len(state.QueuedReserves) != 0 || len(state.BackstopInstances) != 0 {
+		t.Fatalf("new slices fabricated entries: auctions=%d userEmissions=%d queued=%d instances=%d",
+			len(state.Auctions), len(state.UserEmissions), len(state.QueuedReserves), len(state.BackstopInstances))
+	}
+	if pool.PoolEmissions != nil {
+		t.Fatalf("pool emissions fabricated: %+v", pool.PoolEmissions)
 	}
 	if len(state.Backstops) != 1 || state.Backstops[0].UnclaimedEmissionsRaw != "" || state.Backstops[0].EmisIndexRaw != "" {
 		t.Fatalf("backstop row fabricated emission fields: %+v", state.Backstops)
@@ -888,6 +897,18 @@ func decodeGapChanges(t *testing.T) []bindings.ContractDataChange {
 			"index":   i128Val(1),
 			"accrued": i128Val(2),
 		})),
+		stateChange(t, poolID, resInitKeyVal(t, contractAddressVal(t, 6)), mapVal(t, map[string]xdr.ScVal{
+			"new_config":  fullQueuedConfigVal(t),
+			"unlock_time": u64Val(1_800_000_000),
+		})),
+		stateChange(t, poolID, symbolVal(t, "PoolEmis"), intMapVal(t, map[uint32]xdr.ScVal{
+			2: u64Val(1_500_000),
+			3: u64Val(8_500_000),
+		})),
+		stateChange(t, backstopID, symbolVal(t, "RZ"), vecVal(contractAddressVal(t, 1))),
+		stateChange(t, backstopID, symbolVal(t, "DropList"), vecVal(vecVal(accountAddressVal(t, 5), i128Val(9)))),
+		stateChange(t, backstopID, xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance},
+			instanceVal(backstopInstanceStorage(t), 9)),
 	)
 }
 

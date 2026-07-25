@@ -336,6 +336,8 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 		Assets:               b.buildAssets(),
 		Auctions:             b.buildAuctions(),
 		UserEmissions:        b.buildUserEmissions(),
+		QueuedReserves:       b.buildQueuedReserves(),
+		BackstopInstances:    b.buildBackstopInstances(),
 	}, dirty
 }
 

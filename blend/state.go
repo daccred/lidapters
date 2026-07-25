@@ -144,11 +144,19 @@ type blendStateBuilder struct {
 	auctions map[string]contracts.AuctionState
 	// userEmis holds each UserEmis(UserReserveKey) entry, keyed by
 	// typedUserEmisEntityKey(user, pool, resTokenID).
-	userEmis    map[string]contracts.UserEmissionState
-	oracles     map[string]*oracleBuilder
-	feeds       map[string]*feedBuilder
-	aggregators map[string]*aggregatorBuilder
-	assets      map[string]contracts.AssetMetadata
+	userEmis map[string]contracts.UserEmissionState
+	// queuedReserves holds each pending ResInit(Address) entry, keyed by
+	// typedReserveEntityKey(pool, asset). Deliberately NOT folded into
+	// pool.reserves: a queue can target a brand-new asset, and folding it in
+	// would fabricate a phantom live reserve.
+	queuedReserves map[string]contracts.QueuedReserveState
+	// backstopInstances holds each backstop contract's decoded identity
+	// (instance addresses + RZ/DropList), keyed by contract ID.
+	backstopInstances map[string]*contracts.BackstopInstanceState
+	oracles           map[string]*oracleBuilder
+	feeds             map[string]*feedBuilder
+	aggregators       map[string]*aggregatorBuilder
+	assets            map[string]contracts.AssetMetadata
 	// owned is the adapter's owned-contract set, threaded in so the reducer can
 	// tell an oracle's contract_data apart from a pool's. It is read-only config,
 	// not per-ledger scratch, so it does not break the run-twice purity guarantee.
@@ -194,6 +202,12 @@ type oracleBuilder struct {
 	decimals     int32
 	assetToIndex map[string]int64
 	priceByIndex map[int64]string
+	// Instance facets beyond the asset list (base/res/admin) plus the oracle's
+	// top-level `timestamp` freshness entry — see contracts.OracleState.
+	baseKey          string
+	resolutionRaw    string
+	admin            string
+	lastTimestampRaw string
 	// synthesized marks an oracle whose map and prices were derived this ledger
 	// from an oracle-aggregator's config plus registered feed rounds
 	// (resolveAggregatorPrices) rather than decoded from the oracle's own
@@ -263,18 +277,20 @@ func (d backstopEmisData) empty() bool {
 
 func newBlendStateBuilder() *blendStateBuilder {
 	return &blendStateBuilder{
-		pools:         map[string]*poolBuilder{},
-		pendingPos:    map[string]pendingUserPositions{},
-		backstopPools: map[string]backstopPoolBalance{},
-		backstopUsers: map[string]backstopUserBalance{},
-		backstopEmis:  map[string]backstopEmisData{},
-		auctions:      map[string]contracts.AuctionState{},
-		userEmis:      map[string]contracts.UserEmissionState{},
-		oracles:       map[string]*oracleBuilder{},
-		feeds:         map[string]*feedBuilder{},
-		aggregators:   map[string]*aggregatorBuilder{},
-		assets:        map[string]contracts.AssetMetadata{},
-		dirtyUsers:    map[string]userIdentity{},
+		pools:             map[string]*poolBuilder{},
+		pendingPos:        map[string]pendingUserPositions{},
+		backstopPools:     map[string]backstopPoolBalance{},
+		backstopUsers:     map[string]backstopUserBalance{},
+		backstopEmis:      map[string]backstopEmisData{},
+		auctions:          map[string]contracts.AuctionState{},
+		userEmis:          map[string]contracts.UserEmissionState{},
+		queuedReserves:    map[string]contracts.QueuedReserveState{},
+		backstopInstances: map[string]*contracts.BackstopInstanceState{},
+		oracles:           map[string]*oracleBuilder{},
+		feeds:             map[string]*feedBuilder{},
+		aggregators:       map[string]*aggregatorBuilder{},
+		assets:            map[string]contracts.AssetMetadata{},
+		dirtyUsers:        map[string]userIdentity{},
 	}
 }
 
@@ -495,12 +511,27 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 		// prices must be restored here for a price-only ledger to resolve anything.
 		ob := b.ensureOracle(oracle.ContractID)
 		ob.decimals = oracle.Decimals
+		ob.baseKey = oracle.BaseKey
+		ob.resolutionRaw = oracle.ResolutionRaw
+		ob.admin = oracle.Admin
+		ob.lastTimestampRaw = oracle.LastTimestampRaw
 		for _, asset := range oracle.Assets {
 			ob.assetToIndex[asset.AssetID] = asset.Index
 		}
 		for _, price := range oracle.Prices {
 			ob.priceByIndex[price.Index] = price.PriceRaw
 		}
+	}
+	for _, queued := range prior.QueuedReserves {
+		// A queued reserve init is only written when queued/cancelled/executed,
+		// so it must be restored to survive to the next ledger.
+		b.queuedReserves[typedReserveEntityKey(queued.PoolContractID, queued.AssetID)] = queued
+	}
+	for _, instance := range prior.BackstopInstances {
+		// The backstop instance is written at deploy and rarely re-emitted —
+		// same carry requirement as the oracle instance.
+		restored := instance
+		b.backstopInstances[instance.ContractID] = &restored
 	}
 	for _, asset := range prior.Assets {
 		// A token's AssetInfo/METADATA instance is written once at deploy and never
@@ -583,7 +614,42 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 		Assets:               b.buildAssets(),
 		Auctions:             b.buildAuctions(),
 		UserEmissions:        b.buildUserEmissions(),
+		QueuedReserves:       b.buildQueuedReserves(),
+		BackstopInstances:    b.buildBackstopInstances(),
 	}
+}
+
+// buildQueuedReserves snapshots the carried ResInit entries, sorted by
+// (pool, asset) so the run-twice output stays byte-identical.
+func (b *blendStateBuilder) buildQueuedReserves() []contracts.QueuedReserveState {
+	if len(b.queuedReserves) == 0 {
+		return nil
+	}
+	queued := make([]contracts.QueuedReserveState, 0, len(b.queuedReserves))
+	for _, entry := range b.queuedReserves {
+		queued = append(queued, entry)
+	}
+	sort.Slice(queued, func(i, j int) bool {
+		if queued[i].PoolContractID != queued[j].PoolContractID {
+			return queued[i].PoolContractID < queued[j].PoolContractID
+		}
+		return queued[i].AssetID < queued[j].AssetID
+	})
+	return queued
+}
+
+// buildBackstopInstances snapshots the carried backstop identities, sorted by
+// contract ID so the run-twice output stays byte-identical.
+func (b *blendStateBuilder) buildBackstopInstances() []contracts.BackstopInstanceState {
+	if len(b.backstopInstances) == 0 {
+		return nil
+	}
+	instances := make([]contracts.BackstopInstanceState, 0, len(b.backstopInstances))
+	for _, instance := range b.backstopInstances {
+		instances = append(instances, *instance)
+	}
+	sort.Slice(instances, func(i, j int) bool { return instances[i].ContractID < instances[j].ContractID })
+	return instances
 }
 
 // mergeBackstopEmis threads a pool's carried BEmisData onto its PoolState —
@@ -691,10 +757,14 @@ func (b *blendStateBuilder) buildOracles() []contracts.OracleState {
 		}
 		sort.Slice(prices, func(i, j int) bool { return prices[i].Index < prices[j].Index })
 		oracles = append(oracles, contracts.OracleState{
-			ContractID: contractID,
-			Decimals:   oracle.decimals,
-			Assets:     assets,
-			Prices:     prices,
+			ContractID:       contractID,
+			Decimals:         oracle.decimals,
+			Assets:           assets,
+			Prices:           prices,
+			BaseKey:          oracle.baseKey,
+			ResolutionRaw:    oracle.resolutionRaw,
+			Admin:            oracle.admin,
+			LastTimestampRaw: oracle.lastTimestampRaw,
 		})
 	}
 	if len(oracles) == 0 {
@@ -777,6 +847,15 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		return
 	}
 
+	// The backstop contract's instance (BToken/Emitter/PoolFact/... symbol
+	// keys) is recognized ahead of the generic pool-instance sniff below, the
+	// same way an oracle's or aggregator's instance is — it carries a wasm
+	// executable and would otherwise be misdecoded as a phantom pool.
+	if b.applyBackstopInstance(change.ContractID, value) {
+		b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, true, b.backstopInstances[change.ContractID])
+		return
+	}
+
 	if wasmHash, ok := contractInstanceWasmHash(value); ok {
 		pool := ensurePool(b.pools, change.ContractID)
 		pool.state.WasmHash = wasmHash
@@ -788,6 +867,34 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 	}
 
 	if sym, ok := scSymbol(key); ok {
+		// Keys that must not fabricate a phantom pool entry: the backstop's
+		// top-level RZ/DropList lists and the mock oracle's `timestamp`
+		// freshness entry live on contracts that are not pools, so they are
+		// absorbed before ensurePool. No Blend pool has these symbol keys.
+		switch sym {
+		case "RZ":
+			if zone, ok := decodeAddressList(value); ok {
+				b.ensureBackstopInstance(change.ContractID).RewardZone = zone
+				b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, true, b.backstopInstances[change.ContractID])
+			}
+			return
+		case "DropList":
+			if list, ok := decodeDropList(value); ok {
+				b.ensureBackstopInstance(change.ContractID).DropList = list
+				b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, true, b.backstopInstances[change.ContractID])
+			}
+			return
+		case "timestamp":
+			// Only meaningful on a contract already decoded as an oracle — a
+			// bare timestamp write for an unknown contract sets nothing (and,
+			// deliberately, fabricates no oracle either).
+			if oracle := b.oracles[change.ContractID]; oracle != nil {
+				if ts, ok := scIntString(value); ok {
+					oracle.lastTimestampRaw = ts
+				}
+			}
+			return
+		}
 		pool := ensurePool(b.pools, change.ContractID)
 		switch sym {
 		case "Config":
@@ -808,6 +915,14 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			b.addDelta(ledgerSeq, "pool", change.ContractID, true, pool.state)
 			b.appendPoolReserves(change.ContractID, ledgerSeq)
 			b.appendPoolUsers(change.ContractID, ledgerSeq)
+		case "PoolEmis":
+			// v2 PoolEmis is Map<u32 res_token_id, u64 share>. A malformed
+			// value (v1 PoolEmissionConfig or garbage) decodes to nothing and
+			// keeps the carried split rather than wiping it.
+			if entries, ok := decodePoolEmissions(value); ok {
+				pool.state.PoolEmissions = entries
+				b.addDelta(ledgerSeq, "pool", change.ContractID, true, pool.state)
+			}
 		}
 		return
 	}
@@ -977,6 +1092,20 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		entityKey := typedUserEmisEntityKey(user, change.ContractID, resTokenID)
 		b.userEmis[entityKey] = emission
 		b.addDelta(ledgerSeq, "user_emission", entityKey, true, emission)
+	case "ResInit":
+		asset, ok := variantAddress(args)
+		if !ok {
+			return
+		}
+		queued, ok := decodeQueuedReserve(change.ContractID, asset, value)
+		if !ok {
+			// Malformed QueuedReserveInit: skip whole — a queued change with an
+			// unknown unlock time or config shape must not surface half-decoded.
+			return
+		}
+		entityKey := typedReserveEntityKey(change.ContractID, asset)
+		b.queuedReserves[entityKey] = queued
+		b.addDelta(ledgerSeq, "queued_reserve", entityKey, true, queued)
 	}
 }
 
@@ -1033,18 +1162,44 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 	if key.Type == xdr.ScValTypeScvLedgerKeyContractInstance {
 		// An oracle-aggregator's instance going not-live takes its configuration
 		// with it — prices stop resolving rather than freezing on the last config.
-		// For every other contract an instance delete stays the no-op it was.
+		// A backstop instance going not-live clears its decoded identity the
+		// same way. For every other contract an instance delete stays the no-op
+		// it was.
 		delete(b.aggregators, change.ContractID)
+		if _, ok := b.backstopInstances[change.ContractID]; ok {
+			delete(b.backstopInstances, change.ContractID)
+			b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, false, nil)
+		}
 		return
 	}
 	if sym, ok := scSymbol(key); ok {
-		if sym == "Config" || sym == "ResList" {
+		switch sym {
+		case "Config", "ResList":
 			delete(b.pools, change.ContractID)
 			b.addDelta(ledgerSeq, "pool", change.ContractID, false, nil)
-		} else if sym == "Backstop" {
+		case "Backstop":
 			if pool := b.pools[change.ContractID]; pool != nil {
 				pool.state.BackstopContract = ""
 				b.addDelta(ledgerSeq, "pool", change.ContractID, true, pool.state)
+			}
+		case "PoolEmis":
+			if pool := b.pools[change.ContractID]; pool != nil {
+				pool.state.PoolEmissions = nil
+				b.addDelta(ledgerSeq, "pool", change.ContractID, true, pool.state)
+			}
+		case "RZ":
+			if instance := b.backstopInstances[change.ContractID]; instance != nil {
+				instance.RewardZone = nil
+				b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, true, instance)
+			}
+		case "DropList":
+			if instance := b.backstopInstances[change.ContractID]; instance != nil {
+				instance.DropList = nil
+				b.addDelta(ledgerSeq, "backstop_instance", change.ContractID, true, instance)
+			}
+		case "timestamp":
+			if oracle := b.oracles[change.ContractID]; oracle != nil {
+				oracle.lastTimestampRaw = ""
 			}
 		}
 		return
@@ -1242,6 +1397,16 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		entityKey := typedUserEmisEntityKey(user, change.ContractID, resTokenID)
 		delete(b.userEmis, entityKey)
 		b.addDelta(ledgerSeq, "user_emission", entityKey, false, nil)
+	case "ResInit":
+		// The queue resolved (set_reserve executed, cancel_set_reserve, or the
+		// entry lapsed) — the pending change is gone either way.
+		asset, ok := variantAddress(args)
+		if !ok {
+			return
+		}
+		entityKey := typedReserveEntityKey(change.ContractID, asset)
+		delete(b.queuedReserves, entityKey)
+		b.addDelta(ledgerSeq, "queued_reserve", entityKey, false, nil)
 	}
 }
 
@@ -1454,6 +1619,12 @@ func applyPoolConfig(pool *poolBuilder, value xdr.ScVal) {
 	if statusRaw, ok := fieldInt32(fields, "status"); ok {
 		pool.state.PoolStatus = blendPoolStatus(statusRaw)
 	}
+	if maxPositions, ok := fieldIntString(fields, "max_positions"); ok {
+		pool.state.MaxPositionsRaw = maxPositions
+	}
+	if minCollateral, ok := fieldIntString(fields, "min_collateral"); ok {
+		pool.state.MinCollateralRaw = minCollateral
+	}
 }
 
 // applyPoolInstanceStorage folds a Blend pool's instance-storage map. A pool's
@@ -1481,6 +1652,20 @@ func applyPoolInstanceStorage(pool *poolBuilder, instance xdr.ScContractInstance
 		case "Backstop":
 			if address, ok := scAddress(entry.Val); ok {
 				pool.state.BackstopContract = address
+			}
+		case "Name":
+			// The on-chain display name — the authoritative value the API's
+			// registry-sourced pool_name can diverge from.
+			if poolName := scValSymbol(entry.Val); poolName != "" {
+				pool.state.Name = poolName
+			}
+		case "Admin":
+			if address, ok := scAddress(entry.Val); ok {
+				pool.state.Admin = address
+			}
+		case "BLNDTkn":
+			if address, ok := scAddress(entry.Val); ok {
+				pool.state.BLNDToken = address
 			}
 		}
 	}
@@ -1726,6 +1911,18 @@ func (b *blendStateBuilder) applyOracleInstance(oracleID string, value xdr.ScVal
 	}
 	oracle := b.ensureOracle(oracleID)
 	oracle.decimals = decimals
+	// Instance facets beyond the asset list (audit section 4): the quote asset
+	// (base), the update cadence (res, seconds) and the admin. Each optional —
+	// absent keys leave the field empty, never guessed.
+	if baseKey, ok := canonicalAssetKey(storage["base"]); ok {
+		oracle.baseKey = baseKey
+	}
+	if resolution, ok := scIntString(storage["res"]); ok {
+		oracle.resolutionRaw = resolution
+	}
+	if admin, ok := scAddress(storage["admin"]); ok {
+		oracle.admin = admin
+	}
 	assetToIndex := map[string]int64{}
 	for i, item := range items {
 		// Each asset is the SEP-40 Asset::Stellar(address) enum, encoded as a vec
@@ -2018,6 +2215,167 @@ func decodeBackstopUserBalance(poolID, user string, value xdr.ScVal) backstopUse
 		})
 	}
 	return balance
+}
+
+// ensureBackstopInstance returns (creating if needed) the carried identity
+// entry for a backstop contract.
+func (b *blendStateBuilder) ensureBackstopInstance(contractID string) *contracts.BackstopInstanceState {
+	instance, ok := b.backstopInstances[contractID]
+	if !ok {
+		instance = &contracts.BackstopInstanceState{ContractID: contractID}
+		b.backstopInstances[contractID] = instance
+	}
+	return instance
+}
+
+// applyBackstopInstance decodes a backstop contract's instance-storage
+// addresses (BToken, BLNDTkn, USDCTkn, Emitter, PoolFact). It returns true
+// only when the instance actually looks like a backstop (it carries a BToken
+// entry — no pool, oracle or aggregator instance has one), so every other
+// contract instance still falls through to its own handling. Each address is
+// independently optional; RZ/DropList arrive as top-level entries and are
+// merged onto the same carried identity elsewhere.
+func (b *blendStateBuilder) applyBackstopInstance(contractID string, value xdr.ScVal) bool {
+	instance, ok := value.GetInstance()
+	if !ok || instance.Storage == nil {
+		return false
+	}
+	storage := map[string]xdr.ScVal{}
+	for _, entry := range []xdr.ScMapEntry(*instance.Storage) {
+		if name, ok := scSymbol(entry.Key); ok {
+			storage[name] = entry.Val
+		}
+	}
+	if _, isBackstop := storage["BToken"]; !isBackstop {
+		return false
+	}
+	state := b.ensureBackstopInstance(contractID)
+	if address, ok := scAddress(storage["BToken"]); ok {
+		state.BackstopToken = address
+	}
+	if address, ok := scAddress(storage["BLNDTkn"]); ok {
+		state.BLNDToken = address
+	}
+	if address, ok := scAddress(storage["USDCTkn"]); ok {
+		state.USDCToken = address
+	}
+	if address, ok := scAddress(storage["Emitter"]); ok {
+		state.Emitter = address
+	}
+	if address, ok := scAddress(storage["PoolFact"]); ok {
+		state.PoolFactory = address
+	}
+	return true
+}
+
+// decodeAddressList decodes a Vec<Address> (the backstop's RZ reward zone).
+// Any non-address element rejects the whole list so a partial membership set
+// is never surfaced.
+func decodeAddressList(value xdr.ScVal) ([]string, bool) {
+	items, ok := scVec(value)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		address, ok := scAddress(item)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, address)
+	}
+	return out, true
+}
+
+// decodeDropList decodes the backstop's DropList Vec<(Address, i128)>. Any
+// malformed pair rejects the whole list.
+func decodeDropList(value xdr.ScVal) ([]contracts.DropListEntry, bool) {
+	items, ok := scVec(value)
+	if !ok {
+		return nil, false
+	}
+	out := make([]contracts.DropListEntry, 0, len(items))
+	for _, item := range items {
+		pair, ok := scVec(item)
+		if !ok || len(pair) < 2 {
+			return nil, false
+		}
+		address, ok := scAddress(pair[0])
+		if !ok {
+			return nil, false
+		}
+		amount, ok := scIntString(pair[1])
+		if !ok {
+			return nil, false
+		}
+		out = append(out, contracts.DropListEntry{Address: address, AmountRaw: amount})
+	}
+	return out, true
+}
+
+// decodePoolEmissions decodes the v2 PoolEmis Map<u32 res_token_id, u64
+// share>. Entries are sorted by reserve token ID; any malformed entry rejects
+// the whole map (a partial split would misattribute emissions). A v1-shaped
+// PoolEmissionConfig ({config, last_time} symbol map) has no u32 keys and is
+// rejected the same way.
+func decodePoolEmissions(value xdr.ScVal) ([]contracts.PoolEmissionEntry, bool) {
+	raw, ok := value.GetMap()
+	if !ok || raw == nil {
+		return nil, false
+	}
+	entries := make([]contracts.PoolEmissionEntry, 0, len(*raw))
+	for _, entry := range *raw {
+		resTokenID, ok := scInt32(entry.Key)
+		if !ok || resTokenID < 0 {
+			return nil, false
+		}
+		share, ok := scIntString(entry.Val)
+		if !ok {
+			return nil, false
+		}
+		entries = append(entries, contracts.PoolEmissionEntry{ReserveTokenID: resTokenID, ShareRaw: share})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ReserveTokenID < entries[j].ReserveTokenID })
+	return entries, true
+}
+
+// decodeQueuedReserve decodes a ResInit(Address) value (QueuedReserveInit
+// {new_config, unlock_time}). unlock_time and a map-shaped new_config are
+// required — a queued change without either is malformed and skipped whole;
+// the individual config fields stay independently optional.
+func decodeQueuedReserve(poolID, asset string, value xdr.ScVal) (contracts.QueuedReserveState, bool) {
+	fields := scMapFields(value)
+	unlockTime, unlockOK := fieldIntString(fields, "unlock_time")
+	config := scMapFields(fields["new_config"])
+	if !unlockOK || config == nil {
+		return contracts.QueuedReserveState{}, false
+	}
+	queued := contracts.QueuedReserveState{
+		PoolContractID: poolID,
+		AssetID:        asset,
+		UnlockTimeRaw:  unlockTime,
+	}
+	set := func(dst *string, name string) {
+		if v, ok := fieldIntString(config, name); ok {
+			*dst = v
+		}
+	}
+	set(&queued.NewConfig.IndexRaw, "index")
+	set(&queued.NewConfig.DecimalsRaw, "decimals")
+	set(&queued.NewConfig.CFactorRaw, "c_factor")
+	set(&queued.NewConfig.LFactorRaw, "l_factor")
+	set(&queued.NewConfig.UtilRaw, "util")
+	set(&queued.NewConfig.MaxUtilRaw, "max_util")
+	set(&queued.NewConfig.RBaseRaw, "r_base")
+	set(&queued.NewConfig.ROneRaw, "r_one")
+	set(&queued.NewConfig.RTwoRaw, "r_two")
+	set(&queued.NewConfig.RThreeRaw, "r_three")
+	set(&queued.NewConfig.ReactivityRaw, "reactivity")
+	set(&queued.NewConfig.SupplyCapRaw, "supply_cap")
+	if enabled, ok := fieldBool(config, "enabled"); ok {
+		queued.NewConfig.Enabled = boolString(enabled)
+	}
+	return queued, true
 }
 
 // decodeBackstopEmisData decodes a BEmisData(pool) value (BackstopEmissionData

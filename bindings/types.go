@@ -81,6 +81,15 @@ type LedgerState struct {
 	// Auctions: the entry is only written when the user's accrual checkpoints,
 	// so it must ride here to survive to the next ledger.
 	UserEmissions []contracts.UserEmissionState
+	// QueuedReserves carries each pending ResInit(Address) entry (the
+	// time-locked reserve-parameter change). Same carry requirement as
+	// Auctions: the entry is only written when queued/cancelled/executed.
+	QueuedReserves []contracts.QueuedReserveState
+	// BackstopInstances carries each backstop contract's decoded identity
+	// (instance addresses + reward zone + drop list). Written at deploy and
+	// rarely re-emitted, so it must ride here — the backstop analog of the
+	// Oracles carry.
+	BackstopInstances []contracts.BackstopInstanceState
 	// AMMPools and AMMPositions are the protocol-neutral state carrier for
 	// share-based and concentrated-liquidity AMMs. They intentionally sit beside
 	// the legacy Blend slices so existing checkpoints remain JSON-compatible.
@@ -480,6 +489,23 @@ type AuctionAmount struct {
 	AmountRaw string
 }
 
+// QueuedReserve is one pending, time-locked reserve-parameter change
+// surfaced to gold: the pool's ResInit entry — a "params about to change"
+// signal. NewConfig carries the queued ReserveConfig fields verbatim as raw
+// strings, only the ones present on-chain.
+type QueuedReserve struct {
+	ID            string
+	Protocol      string
+	ContractID    string // the pool
+	AssetID       string
+	UnlockTimeRaw string // unix seconds, raw
+	UnlockTime    time.Time
+	NewConfig     map[string]string
+	LedgerSeq     int64
+	Timestamp     time.Time
+	Metadata      map[string]string
+}
+
 // UserEmission is one user's per-reserve-token emission accrual surfaced to
 // gold: the checkpointed unclaimed BLND (AccruedRaw) plus the user's last
 // accrued index (IndexRaw, 14 decimals) for one reserve side. AssetID and
@@ -535,6 +561,7 @@ type TransformOutput struct {
 	ReserveEmissions   []ReserveEmission
 	UserEmissions      []UserEmission
 	Auctions           []Auction
+	QueuedReserves     []QueuedReserve
 	Backstops          []Backstop
 	Contracts          []Contract
 	Quarantine         []QuarantineEvent

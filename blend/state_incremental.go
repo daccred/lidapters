@@ -98,7 +98,7 @@ func newIncrementalStrategy(a *Adapter) *incrementalStrategy {
 	return &incrementalStrategy{adapter: a}
 }
 
-func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
+func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
 	if s.mirror == nil || prior != s.lastOut || s.bisect.reloadEachLedger {
 		// Not a continuation of our own last output: rebuild the mirror from
 		// prior exactly as paranoid would. One O(total state) ledger, then the
@@ -107,13 +107,15 @@ func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes [
 	} else {
 		s.normalizeCarry()
 	}
+	s.mirror.ledgerSeq = ledgerSeq
 	for _, change := range changes {
 		s.mirror.apply(change, ledgerSeq)
 	}
 	sortTypedStateDeltas(s.mirror.deltas)
 	out, dirty := s.snapshot(closeTime)
+	sortDecodeDiagnostics(s.mirror.diagnostics)
 	s.lastOut = out
-	return out, s.mirror.deltas, dirty
+	return out, s.mirror.deltas, dirty, s.mirror.diagnostics
 }
 
 // reseed rebuilds the mirror from prior via the same loadPrior the paranoid
@@ -137,7 +139,7 @@ func (s *incrementalStrategy) reseed(prior *bindings.LedgerState) {
 			pool:      pending.poolContract,
 			composite: composite,
 			out:       pendingOut(pending),
-			block:     s.computeBlock(pending),
+			block:     s.computeBlock(pending, nil),
 		}
 		s.keys = append(s.keys, entry)
 		s.index[composite] = entry
@@ -165,7 +167,8 @@ func (s *incrementalStrategy) refreshOwned() {
 // round-trip on the live mirror, so this ledger's apply starts from exactly
 // the mirror a fresh reload of lastOut would produce:
 //
-//   - deltas are per-ledger scratch — reset;
+//   - deltas are per-ledger scratch — reset; the skipped-leg diagnostics are
+//     the same per-ledger scratch — reset;
 //   - synthesized oracles are excluded from the Oracles carry (buildOracles
 //     skips them; they are re-derived every ledger from aggregator + feed
 //     state) — dropped;
@@ -180,6 +183,7 @@ func (s *incrementalStrategy) normalizeCarry() {
 	b := s.mirror
 	s.refreshOwned()
 	b.deltas = nil
+	b.diagnostics = nil
 	for id, oracle := range b.oracles {
 		if oracle.synthesized {
 			delete(b.oracles, id)
@@ -276,11 +280,18 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 	for composite, identity := range s.dirty {
 		pending, live := b.pendingPos[composite]
 		entry, present := s.index[composite]
+		// Every entry in this loop is a pair this ledger touched, so its block
+		// recomputation is exactly where the fold's skipped-leg diagnostics are
+		// recorded — the incremental analog of paranoid's build() running the
+		// sink for the dirty pairs. The carried-cache rebuilds (reseed,
+		// rebuildPendingUsers) pass a nil sink: they are not this fold's output
+		// computation.
+		sink := &positionSkipSink{ledgerSeq: b.ledgerSeq, out: &b.diagnostics}
 		switch {
 		case live && present:
 			entry.out = pendingOut(pending)
 			s.usersLen -= len(entry.block)
-			entry.block = s.computeBlock(pending)
+			entry.block = s.computeBlock(pending, sink)
 			s.usersLen += len(entry.block)
 		case live && !present:
 			entry = &userEntry{
@@ -288,7 +299,7 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 				pool:      identity.pool,
 				composite: composite,
 				out:       pendingOut(pending),
-				block:     s.computeBlock(pending),
+				block:     s.computeBlock(pending, sink),
 			}
 			s.insertKey(entry)
 			s.index[composite] = entry
@@ -354,7 +365,7 @@ func (s *incrementalStrategy) rebuildPendingUsers() ([]contracts.PendingUserPosi
 			continue
 		}
 		finalizePoolReserves(pool)
-		users = append(users, buildUserPositionsForPending(pool, p)...)
+		users = append(users, buildUserPositionsForPending(pool, p, nil)...)
 	}
 	sort.Slice(pending, func(i, j int) bool {
 		if pending[i].Address != pending[j].Address {
@@ -382,13 +393,15 @@ func (s *incrementalStrategy) rebuildPendingUsers() ([]contracts.PendingUserPosi
 // type). Concatenating such blocks in (address, pool) key order reproduces the
 // paranoid global users sort exactly: the full sort key (address, pool, asset,
 // type) is distinct per element, so the unstable sort has a single possible
-// result, and address/pool are constant within a block.
-func (s *incrementalStrategy) computeBlock(pending pendingUserPositions) []contracts.UserReservePosition {
+// result, and address/pool are constant within a block. The sink is non-nil
+// only when the recomputation IS this ledger's dirty-pair update (see
+// snapshot); cache rebuilds pass nil.
+func (s *incrementalStrategy) computeBlock(pending pendingUserPositions, sink *positionSkipSink) []contracts.UserReservePosition {
 	pool := s.mirror.pools[pending.poolContract]
 	if pool == nil {
 		return nil
 	}
-	block := buildUserPositionsForPending(pool, pending)
+	block := buildUserPositionsForPending(pool, pending, sink)
 	sort.Slice(block, func(i, j int) bool {
 		if block[i].AssetID != block[j].AssetID {
 			return block[i].AssetID < block[j].AssetID

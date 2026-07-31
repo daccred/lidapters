@@ -102,26 +102,34 @@ type PoolState struct {
 }
 
 type ReserveState struct {
-	ReserveIndex    int32
-	AssetID         string
-	AssetDecimals   int32
-	BRateRaw        string
-	DRateRaw        string
-	BSupplyRaw      string
-	DSupplyRaw      string
-	PoolBalanceRaw  string
-	CFactorRaw      string
-	LFactorRaw      string
-	UtilTargetRaw   string
-	MaxUtilRaw      string
-	RBaseRaw        string
-	ROneRaw         string
-	RTwoRaw         string
-	RThreeRaw       string
-	RateModifierRaw string
-	SupplyCapRaw    string
-	OraclePriceRaw  string
-	OracleDecimals  int32
+	ReserveIndex int32
+	// ReserveIndexKnown marks whether ReserveIndex came from a successfully
+	// decoded ResConfig.index (or config hydration of such a record). Zero is a
+	// valid reserve index, so validity can never be inferred from the value: a
+	// reserve materialized by ResData alone keeps the zero default, and only
+	// this bit distinguishes "configured at index 0" from "index never seen".
+	// Only a known index participates in index-based resolution, and only when
+	// it is unique within the pool.
+	ReserveIndexKnown bool
+	AssetID           string
+	AssetDecimals     int32
+	BRateRaw          string
+	DRateRaw          string
+	BSupplyRaw        string
+	DSupplyRaw        string
+	PoolBalanceRaw    string
+	CFactorRaw        string
+	LFactorRaw        string
+	UtilTargetRaw     string
+	MaxUtilRaw        string
+	RBaseRaw          string
+	ROneRaw           string
+	RTwoRaw           string
+	RThreeRaw         string
+	RateModifierRaw   string
+	SupplyCapRaw      string
+	OraclePriceRaw    string
+	OracleDecimals    int32
 	// Enabled is ResConfig's per-reserve "can act right now" flag — distinct from
 	// the pool-level status. ReactivityRaw is the IR-curve reactivity constant
 	// (u32, 7-dp), governing how fast ir_mod moves.

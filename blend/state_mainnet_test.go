@@ -39,11 +39,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/daccred/lidapters/bindings"
 	"github.com/daccred/lidapters/blend/contracts"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -168,11 +170,11 @@ func newMainnetAdapter(t *testing.T) *Adapter {
 func mainnetPrior() *bindings.LedgerState {
 	fixedReserves := make([]contracts.ReserveState, 0, 3)
 	for i, asset := range []string{xlmSACID, usdcTokenID, eurcTokenID} {
-		fixedReserves = append(fixedReserves, contracts.ReserveState{AssetID: asset, ReserveIndex: int32(i)})
+		fixedReserves = append(fixedReserves, contracts.ReserveState{AssetID: asset, ReserveIndex: int32(i), ReserveIndexKnown: true})
 	}
 	ybxReserves := make([]contracts.ReserveState, 0, len(ybxReserveAssets))
 	for i, asset := range ybxReserveAssets {
-		ybxReserves = append(ybxReserves, contracts.ReserveState{AssetID: asset, ReserveIndex: int32(i)})
+		ybxReserves = append(ybxReserves, contracts.ReserveState{AssetID: asset, ReserveIndex: int32(i), ReserveIndexKnown: true})
 	}
 	return &bindings.LedgerState{
 		Pools: []contracts.PoolState{
@@ -756,6 +758,118 @@ func TestBlendMainnet_LiveConfigIdentity(t *testing.T) {
 			t.Errorf("drop list[%d] = %+v, want %+v", i, backstop.DropList[i], want)
 		}
 	}
+}
+
+// witnessUser33 is the wallet whose YieldBlox positions were misattributed in
+// the #33 mainnet repro (bounded replay 62,986,500–62,988,499, ledger
+// 62,986,834). The amounts below are hand-derived from that ledger's decoded
+// Positions entry XDR: collateral {0: 210,346,315,861 (XLM), 1: 16,523,965,334
+// (USDC)}, liabilities {0: 14,746,315,917, 1: 12,665,205,938}.
+const witnessUser33 = "GD4EN5NB25YLXKTCUV7XPIPDL6RUQEC7L7T7JMB2QMGPFSKAHNMFWGC6"
+
+// TestBlendMainnet_BoundedReplayUnknownIndexNeverMisattributes replays the #33
+// witness shape: a pinned-start bounded replay with no config seed, where only
+// USDC's ResData has appeared in-window before the witness wallet's Positions
+// entry folds at 62,986,834. USDC's reserve holds the zero-value index, so the
+// uncorrected fold labels the XLM bucket-0 amounts as USDC and drops the true
+// USDC bucket-1 legs. The corrected fold emits no position rows at all: both
+// indexes are unmapped, and skipped legs surface as diagnostics instead.
+func TestBlendMainnet_BoundedReplayUnknownIndexNeverMisattributes(t *testing.T) {
+	t.Parallel()
+	adapter := newMainnetAdapter(t)
+
+	resData := stateChange(t, yieldBloxPoolID, variantVal(t, "ResData", addressVal(t, usdcTokenID)), mapVal(t, map[string]xdr.ScVal{
+		"d_rate":   i128Val(962409238681),
+		"b_rate":   i128Val(1_000_000_000),
+		"b_supply": i128Val(5000),
+		"d_supply": i128Val(1200),
+	}))
+	prior, err := adapter.DecodeStateAt(nil, []bindings.ContractDataChange{resData}, 62986833, time.Unix(1785300000, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode ResData ledger: %v", err)
+	}
+
+	positions := stateChange(t, yieldBloxPoolID, variantVal(t, "Positions", accountAddressValFromID(t, witnessUser33)), mapVal(t, map[string]xdr.ScVal{
+		"collateral":  intMapVal(t, map[uint32]xdr.ScVal{0: i128Val(210346315861), 1: i128Val(16523965334)}),
+		"liabilities": intMapVal(t, map[uint32]xdr.ScVal{0: i128Val(14746315917), 1: i128Val(12665205938)}),
+	}))
+	state, err := adapter.DecodeStateAt(prior, []bindings.ContractDataChange{positions}, 62986834, time.Unix(1785300005, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode witness ledger: %v", err)
+	}
+
+	for _, u := range state.Users {
+		if u.Address != witnessUser33 {
+			continue
+		}
+		if u.AssetID == usdcTokenID && u.BTokensRaw == "210346315861" {
+			t.Errorf("XLM collateral misattributed to USDC through the zero-value index: %+v", u)
+		}
+	}
+	if got := nonZeroPositions(state, witnessUser33); len(got) != 0 {
+		t.Errorf("unmapped witness legs resolved anyway: %+v, want none — both reserve indexes are unknown", got)
+	}
+
+	// All four skipped legs (collateral and liabilities, buckets 0 and 1)
+	// surface as unmapped_reserve_index diagnostics at the witness ledger, with
+	// the ResData-only USDC reserve as the sole candidate — the skip is loud,
+	// so a bounded replay that hits this is visibly incomplete.
+	diags := adapter.LastDecodeDiagnostics()
+	wantAmounts := map[string]string{
+		"collateral|0": "210346315861",
+		"collateral|1": "16523965334",
+		"liability|0":  "14746315917",
+		"liability|1":  "12665205938",
+	}
+	if len(diags) != len(wantAmounts) {
+		t.Fatalf("diagnostics = %+v, want %d skipped-leg records", diags, len(wantAmounts))
+	}
+	for _, d := range diags {
+		key := d.PositionType + "|" + strconv.Itoa(int(d.ReserveIndex))
+		want, ok := wantAmounts[key]
+		if !ok {
+			t.Errorf("unexpected diagnostic leg %s", key)
+			continue
+		}
+		delete(wantAmounts, key)
+		if d.Code != bindings.DecodeDiagnosticUnmappedReserveIndex {
+			t.Errorf("%s code = %q, want %q", key, d.Code, bindings.DecodeDiagnosticUnmappedReserveIndex)
+		}
+		if d.LedgerSeq != 62986834 || d.PoolContractID != yieldBloxPoolID || d.Address != witnessUser33 {
+			t.Errorf("%s identity = {ledger %d, pool %q, address %q}, want the 62,986,834 witness",
+				key, d.LedgerSeq, d.PoolContractID, d.Address)
+		}
+		if d.AmountRaw != want {
+			t.Errorf("%s amount = %q, want %q", key, d.AmountRaw, want)
+		}
+		if len(d.CandidateAssetIDs) != 1 || d.CandidateAssetIDs[0] != usdcTokenID {
+			t.Errorf("%s candidates = %v, want [USDC %s]", key, d.CandidateAssetIDs, usdcTokenID)
+		}
+	}
+	if len(wantAmounts) != 0 {
+		t.Errorf("diagnostics missing legs: %v", wantAmounts)
+	}
+}
+
+// accountAddressValFromID builds the account-address ScVal for a real strkey
+// account ID — the addressVal twin for G... wallets.
+func accountAddressValFromID(t *testing.T, accountID string) xdr.ScVal {
+	t.Helper()
+	raw, err := strkey.Decode(strkey.VersionByteAccountID, accountID)
+	if err != nil {
+		t.Fatalf("decode account id %s: %v", accountID, err)
+	}
+	var pk xdr.Uint256
+	copy(pk[:], raw)
+	account, err := xdr.NewAccountId(xdr.PublicKeyTypePublicKeyTypeEd25519, pk)
+	if err != nil {
+		t.Fatalf("account id: %v", err)
+	}
+	address, err := xdr.NewScAddress(xdr.ScAddressTypeScAddressTypeAccount, account)
+	if err != nil {
+		t.Fatalf("account address: %v", err)
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvAddress, Address: &address}
 }
 
 func mustBase64(t *testing.T, s string) []byte {

@@ -503,11 +503,11 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			if pool.ContractID != emission.PoolContractID {
 				continue
 			}
-			for _, reserve := range pool.Reserves {
-				if reserve.ReserveIndex == emission.ReserveTokenID/2 {
-					assetID = reserve.AssetID
-					break
-				}
+			// The same known-unique rule as the fold's reserveByIndex: an
+			// unknown or duplicate index resolves to nothing — the raw
+			// ReserveTokenID still rides along, the asset is never guessed.
+			if reserve, ok := reserveByIndex(pool, emission.ReserveTokenID/2); ok {
+				assetID = reserve.AssetID
 			}
 			break
 		}

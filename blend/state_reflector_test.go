@@ -118,9 +118,9 @@ func fixedPoolPrior() *bindings.LedgerState {
 			OracleContract: fixedAggregatorID,
 			PoolStatus:     "active",
 			Reserves: []contracts.ReserveState{
-				{AssetID: xlmSACID, ReserveIndex: 0},
-				{AssetID: usdcTokenID, ReserveIndex: 1},
-				{AssetID: eurcTokenID, ReserveIndex: 2},
+				{AssetID: xlmSACID, ReserveIndex: 0, ReserveIndexKnown: true},
+				{AssetID: usdcTokenID, ReserveIndex: 1, ReserveIndexKnown: true},
+				{AssetID: eurcTokenID, ReserveIndex: 2, ReserveIndexKnown: true},
 			},
 		}},
 	}
@@ -423,10 +423,10 @@ func TestReflector_YieldBloxShape(t *testing.T) {
 			OracleContract: ybxAggregatorID,
 			PoolStatus:     "active",
 			Reserves: []contracts.ReserveState{
-				{AssetID: xlmSACID, ReserveIndex: 0},
-				{AssetID: usdcTokenID, ReserveIndex: 1},
-				{AssetID: ybxBaseAsset1, ReserveIndex: 2},
-				{AssetID: ybxBaseAsset2, ReserveIndex: 3},
+				{AssetID: xlmSACID, ReserveIndex: 0, ReserveIndexKnown: true},
+				{AssetID: usdcTokenID, ReserveIndex: 1, ReserveIndexKnown: true},
+				{AssetID: ybxBaseAsset1, ReserveIndex: 2, ReserveIndexKnown: true},
+				{AssetID: ybxBaseAsset2, ReserveIndex: 3, ReserveIndexKnown: true},
 			},
 		}},
 	}

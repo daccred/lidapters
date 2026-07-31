@@ -413,7 +413,7 @@ func TestTransform_UserEmissionResolvesAssetAndSide(t *testing.T) {
 			Pools: []contracts.PoolState{{
 				ContractID: "CPOOL",
 				WasmHash:   "known-v2",
-				Reserves:   []contracts.ReserveState{{ReserveIndex: 1, AssetID: asset}},
+				Reserves:   []contracts.ReserveState{{ReserveIndex: 1, ReserveIndexKnown: true, AssetID: asset}},
 			}},
 			UserEmissions: []contracts.UserEmissionState{
 				// res_token_id 3 = reserve index 1, supply side.
@@ -730,6 +730,7 @@ func TestTransform_ReserveEmissionCarriesIndexAndLastTime(t *testing.T) {
 				WasmHash:   "known-v2",
 				Reserves: []contracts.ReserveState{{
 					ReserveIndex:            1,
+					ReserveIndexKnown:       true,
 					AssetID:                 "CASSET",
 					AssetDecimals:           7,
 					BRateRaw:                "1000000000000",

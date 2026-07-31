@@ -31,6 +31,12 @@ var _ bindings.CloseTimeStateDecoder = (*Adapter)(nil)
 // (math.go).
 var _ bindings.DirtyPositionsProvider = (*Adapter)(nil)
 
+// Adapter exposes the skipped-leg diagnostics from its most recent
+// DecodeState/DecodeStateAt call, so a consumer can log and count the position
+// legs the fold could not attribute instead of discovering corrupted rows
+// after the fact. See bindings.DecodeDiagnosticsProvider.
+var _ bindings.DecodeDiagnosticsProvider = (*Adapter)(nil)
+
 type Adapter struct {
 	cfg Config
 	// contracts is the owned contract-ID set OwnsContract checks. It is
@@ -62,6 +68,10 @@ type Adapter struct {
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDirtyPositions / bindings.DirtyPositionsProvider.
 	lastDirty []bindings.DirtyPosition
+	// lastDiagnostics is the skipped-leg diagnostic set from the most recent
+	// DecodeState/DecodeStateAt call, overwritten by the next one. See
+	// LastDecodeDiagnostics / bindings.DecodeDiagnosticsProvider.
+	lastDiagnostics []bindings.DecodeDiagnostic
 }
 
 // LastDirtyPositions returns the (address, pool) pairs whose position changed
@@ -69,6 +79,14 @@ type Adapter struct {
 // was an upsert or a tombstone removal. See bindings.DirtyPositionsProvider.
 func (a *Adapter) LastDirtyPositions() []bindings.DirtyPosition {
 	return a.lastDirty
+}
+
+// LastDecodeDiagnostics returns the non-zero position legs the most recent
+// DecodeState/DecodeStateAt call skipped because their reserve index was
+// unmapped or ambiguous, sorted by (code, pool, address, position type,
+// reserve index, amount, candidates). See bindings.DecodeDiagnosticsProvider.
+func (a *Adapter) LastDecodeDiagnostics() []bindings.DecodeDiagnostic {
+	return a.lastDiagnostics
 }
 
 func New(cfg Config) (*Adapter, error) {

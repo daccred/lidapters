@@ -38,6 +38,11 @@ type parityRun struct {
 	incremental *Adapter
 	pState      *bindings.LedgerState
 	iState      *bindings.LedgerState
+	// pDiags / iDiags are the skipped-leg diagnostics of the most recent
+	// foldLedger call, kept so a test can assert their content after parity
+	// itself has been established.
+	pDiags []bindings.DecodeDiagnostic
+	iDiags []bindings.DecodeDiagnostic
 }
 
 // newParityRun builds the two adapters. register applies identical
@@ -77,9 +82,10 @@ func (r *parityRun) strategy() *incrementalStrategy {
 // red-check tests need the non-fatal form.
 func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) {
 	r.t.Helper()
-	pNext, pDeltas, pDirty := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
-	iNext, iDeltas, iDirty := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
+	pNext, pDeltas, pDirty, pDiags := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
+	iNext, iDeltas, iDirty, iDiags := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
 	r.pState, r.iState = pNext, iNext
+	r.pDiags, r.iDiags = pDiags, iDiags
 
 	pJSON := mustMarshalState(r.t, pNext)
 	iJSON := mustMarshalState(r.t, iNext)
@@ -91,6 +97,9 @@ func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) 
 	}
 	if !reflect.DeepEqual(pDirty, iDirty) {
 		return false, fmt.Sprintf("dirty-positions mismatch:\nparanoid=%+v\nincremental=%+v", pDirty, iDirty)
+	}
+	if !reflect.DeepEqual(pDiags, iDiags) {
+		return false, fmt.Sprintf("decode-diagnostics mismatch:\nparanoid=%+v\nincremental=%+v", pDiags, iDiags)
 	}
 	return true, ""
 }
@@ -762,4 +771,86 @@ func TestIncrementalParity_RedCheck(t *testing.T) {
 			t.Fatalf("red-check failed: a dropped update sailed through the parity gate undetected")
 		}
 	})
+}
+
+// TestIncrementalParity_ReserveIndexValidityDiagnostics folds the #33
+// lifecycle — ResData-before-ResConfig skips, a quiet carry ledger, the
+// correcting remap, a duplicate-known-index window, and the duplicate's
+// removal — through both strategies and asserts byte-identical state, deltas,
+// dirty sets, AND skipped-leg diagnostics at every ledger, then pins the
+// diagnostics' content ledger by ledger.
+func TestIncrementalParity_ReserveIndexValidityDiagnostics(t *testing.T) {
+	t.Parallel()
+	pool1 := validContractString(t, 1)
+	xlmAsset := contractAddressVal(t, 2)
+	usdcAsset := contractAddressVal(t, 7)
+	dupAsset := contractAddressVal(t, 10)
+	xlmID := scValAddress(xlmAsset)
+	dupID := scValAddress(dupAsset)
+	user5 := accountAddressVal(t, 5)
+
+	dupCandidates := []string{xlmID, dupID}
+	if xlmID > dupID {
+		dupCandidates[0], dupCandidates[1] = dupCandidates[1], dupCandidates[0]
+	}
+
+	ledgers := []parityLedger{
+		// ResData-only window: both witness buckets unmapped.
+		{seq: 200, changes: []bindings.ContractDataChange{
+			resDataChange(t, pool1, usdcAsset),
+			witnessPositionsChange(t, pool1, user5),
+		}},
+		// Quiet carry: the unresolved legs persist but the fold touched
+		// nothing, so no diagnostics re-emit.
+		{seq: 201},
+		// The correcting remap: both ResConfigs fold, every leg resolves.
+		{seq: 202, changes: []bindings.ContractDataChange{
+			resConfigChange(t, pool1, xlmAsset, 0),
+			resConfigChange(t, pool1, usdcAsset, 1),
+		}},
+		// A second ResConfig claims index 0: the index becomes ambiguous and
+		// the bucket-0 legs skip again — as duplicates this time.
+		{seq: 203, changes: []bindings.ContractDataChange{
+			resConfigChange(t, pool1, dupAsset, 0),
+		}},
+		// The duplicate's ResConfig is explicitly deleted: index 0 is unique
+		// again and the bucket-0 legs come back.
+		{seq: 204, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, variantVal(t, "ResConfig", dupAsset), mapVal(t, map[string]xdr.ScVal{}),
+				withLive(false), withNoValue(), withChangeType("LedgerEntryChangeTypeLedgerEntryRemoved")),
+		}},
+	}
+
+	run := newParityRun(t, nil, nil)
+	wantDiags := []struct {
+		count      int
+		code       string
+		candidates []string
+	}{
+		{count: 4, code: bindings.DecodeDiagnosticUnmappedReserveIndex, candidates: []string{scValAddress(usdcAsset)}},
+		{count: 0},
+		{count: 0},
+		{count: 2, code: bindings.DecodeDiagnosticDuplicateReserveIndex, candidates: dupCandidates},
+		{count: 0},
+	}
+	for i, ledger := range ledgers {
+		if equal, detail := run.foldLedger(ledger); !equal {
+			t.Fatalf("parity broken at ledger %d: %s", ledger.seq, detail)
+		}
+		want := wantDiags[i]
+		if len(run.pDiags) != want.count {
+			t.Fatalf("ledger %d diagnostics = %+v, want %d records", ledger.seq, run.pDiags, want.count)
+		}
+		for _, d := range run.pDiags {
+			if d.Code != want.code {
+				t.Errorf("ledger %d diagnostic code = %q, want %q", ledger.seq, d.Code, want.code)
+			}
+			if fmt.Sprint(d.CandidateAssetIDs) != fmt.Sprint(want.candidates) {
+				t.Errorf("ledger %d diagnostic candidates = %v, want %v", ledger.seq, d.CandidateAssetIDs, want.candidates)
+			}
+			if d.LedgerSeq != ledger.seq {
+				t.Errorf("ledger %d diagnostic stamped ledger %d", ledger.seq, d.LedgerSeq)
+			}
+		}
+	}
 }

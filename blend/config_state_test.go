@@ -3,9 +3,11 @@ package blend
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/daccred/lidapters/bindings"
+	"github.com/daccred/lidapters/blend/contracts"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -381,4 +383,65 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// TestHydrateConfig_LegacyReservePayloadMarksIndexKnown pins that hydrating a
+// blend.reserve record — including a pre-release payload with no
+// index-validity field — marks the reserve's index known, legitimate index
+// zero included. The record exists only because a ResConfig was decoded, so
+// the known bit is provenance, not payload.
+func TestHydrateConfig_LegacyReservePayloadMarksIndexKnown(t *testing.T) {
+	t.Parallel()
+	adapter := newTestAdapter(t)
+	poolID := validContractString(t, 1)
+	assetZero := validContractString(t, 2)
+	assetOne := validContractString(t, 7)
+
+	// Hand-written pre-release payloads: no index-known field anywhere.
+	legacy := func(assetID string, index int) []byte {
+		return []byte(`{"pool_id":"` + poolID + `","asset_id":"` + assetID + `","index":` + strconv.Itoa(index) + `,"decimals":7,"c_factor":"8000000","l_factor":"9000000","util_target":"","max_util":"","r_base":"","r_one":"","r_two":"","r_three":"","supply_cap":"","reactivity":"","enabled":true,"supply_emis_eps":"","supply_emis_expiration":"","borrow_emis_eps":"","borrow_emis_expiration":""}`)
+	}
+	seed, err := adapter.HydrateConfig([]bindings.ConfigRecord{
+		{Kind: kindPool, EntityKey: poolID, Payload: []byte(`{"oracle":"","backstop":"","status":"active","take_rate":"","wasm_hash":""}`)},
+		{Kind: kindReserve, EntityKey: poolID + reserveKeySep + assetZero, Payload: legacy(assetZero, 0)},
+		{Kind: kindReserve, EntityKey: poolID + reserveKeySep + assetOne, Payload: legacy(assetOne, 1)},
+	})
+	if err != nil {
+		t.Fatalf("hydrate: %v", err)
+	}
+	if len(seed.Pools) != 1 || len(seed.Pools[0].Reserves) != 2 {
+		t.Fatalf("seed = %+v, want 1 pool with 2 reserves", seed.Pools)
+	}
+	for _, r := range seed.Pools[0].Reserves {
+		if !r.ReserveIndexKnown {
+			t.Errorf("hydrated reserve %s (index %d) not marked known — a decoded config record implies a known index", r.AssetID, r.ReserveIndex)
+		}
+	}
+	if _, ok := reserveByIndex(seed.Pools[0], 0); !ok {
+		t.Errorf("legitimate index zero did not resolve after hydration")
+	}
+}
+
+// TestReserveByIndex_RequiresKnownUniqueIndex pins the resolution rule the
+// config-record and user-emission paths share with the fold: only a known,
+// unique index resolves. An unknown index (never configured) and a duplicate
+// known index are both unresolved — never a guessed winner.
+func TestReserveByIndex_RequiresKnownUniqueIndex(t *testing.T) {
+	t.Parallel()
+	pool := contracts.PoolState{Reserves: []contracts.ReserveState{
+		{AssetID: "A", ReserveIndex: 0, ReserveIndexKnown: true},
+		{AssetID: "B", ReserveIndex: 1, ReserveIndexKnown: true},
+		{AssetID: "C", ReserveIndex: 1, ReserveIndexKnown: true}, // duplicate of B
+		{AssetID: "D"}, // ResData-only: index 0 default, not known
+	}}
+
+	if r, ok := reserveByIndex(pool, 0); !ok || r.AssetID != "A" {
+		t.Errorf("index 0 = (%s, %v), want the legitimate configured reserve A", r.AssetID, ok)
+	}
+	if _, ok := reserveByIndex(pool, 1); ok {
+		t.Errorf("duplicate known index 1 resolved, want ambiguous")
+	}
+	if _, ok := reserveByIndex(pool, 2); ok {
+		t.Errorf("unmapped index 2 resolved, want unresolved")
+	}
 }

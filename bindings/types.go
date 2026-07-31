@@ -282,6 +282,46 @@ type DirtyPositionsProvider interface {
 	LastDirtyPositions() []DirtyPosition
 }
 
+// Required DecodeDiagnostic reason codes. An unmapped index has no configured
+// reserve behind it (the cold-start/bounded-replay case: the reserve's
+// ResConfig never folded, so its true index is unknown); a duplicate index has
+// two or more configured reserves claiming it, so resolving either way would
+// misattribute.
+const (
+	DecodeDiagnosticUnmappedReserveIndex  = "unmapped_reserve_index"
+	DecodeDiagnosticDuplicateReserveIndex = "duplicate_reserve_index"
+)
+
+// DecodeDiagnostic is one non-zero position leg the fold skipped because its
+// reserve index could not be resolved to exactly one configured reserve.
+// Skipping is financially safer than guessing (a wrong-but-plausible row is
+// strictly worse than a missing-and-counted one in a position store downstream
+// health-factor math consumes), but a silent skip is not acceptable: each
+// record names the ledger, pool, user, position type, raw reserve index, raw
+// amount, and the sorted candidate assets — the unknown-index reserves for an
+// unmapped index, the claiming reserves for a duplicate.
+type DecodeDiagnostic struct {
+	Code              string
+	LedgerSeq         int64
+	PoolContractID    string
+	Address           string
+	PositionType      string
+	ReserveIndex      int32
+	AmountRaw         string
+	CandidateAssetIDs []string // sorted; empty when no candidate exists
+}
+
+// DecodeDiagnosticsProvider is an additive capability an adapter MAY implement
+// alongside ProtocolAdapter: after a DecodeState/DecodeStateAt call, it
+// reports the position legs that fold skipped as unresolvable, sorted by
+// (code, pool, address, position type, reserve index, amount, candidates).
+// Same single-fold-at-a-time contract as DirtyPositionsProvider: the set
+// reflects the most recent fold, is overwritten by the next one, and must be
+// read immediately after folding, before the next ledger.
+type DecodeDiagnosticsProvider interface {
+	LastDecodeDiagnostics() []DecodeDiagnostic
+}
+
 // CloseTimeStateDecoder is the close-time-aware variant of DecodeState. The
 // ledger close time comes from the same close-meta the changes were extracted
 // from — it is fold INPUT, not a clock read, so purity holds: (prior, changes,

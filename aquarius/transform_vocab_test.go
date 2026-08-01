@@ -255,7 +255,9 @@ func TestExactNameEmission(t *testing.T) {
 	if string(act.ActivityType) != "deposit_liquidity" {
 		t.Fatalf("activity type %q, want the exact on-chain name", act.ActivityType)
 	}
-	if act.AmountRaw != "41" || act.Address == "" {
+	// deposit_liquidity has no per-user attribution shape: the activity lands
+	// under the emitting pool itself, with no scavenged asset or amount.
+	if act.Address != "pool" || act.AssetID != "" || act.AmountRaw != "" {
 		t.Fatalf("activity payload %#v", act)
 	}
 }

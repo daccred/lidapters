@@ -69,14 +69,8 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 			out.AMMRewards = append(out.AMMRewards, bindings.AMMReward{ID: stableID(group, "aqua", pos.RewardTokenID), PositionGroupID: group, Address: pos.Address, Protocol: a.cfg.Protocol, PoolContractID: pos.PoolContractID, RewardTokenID: pos.RewardTokenID, RewardKind: "aqua", AmountRaw: pending, LedgerSeq: in.LedgerSeq, Timestamp: in.CloseTime, Metadata: map[string]string{"price_unavailable": "true"}})
 		}
 	}
-	txUsers := map[string]string{}
 	for _, evt := range in.Events {
-		if u := eventUser(evt); u != "" {
-			txUsers[evt.TxHash] = u
-		}
-	}
-	for _, evt := range in.Events {
-		acts, qs := a.decodeActivities(evt, txUsers[evt.TxHash], a.eventClass(evt.ContractID, pools))
+		acts, qs := a.decodeActivities(evt, a.eventClass(evt.ContractID, pools))
 		out.Activities = append(out.Activities, acts...)
 		out.Quarantine = append(out.Quarantine, qs...)
 	}
@@ -122,23 +116,6 @@ func appendRangeComponents(out *bindings.TransformOutput, group string, p bindin
 			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "unclaimed_fee", x, "", &lo, &hi, in, false))
 		}
 	}
-}
-
-func eventUser(evt bindings.RawEventEnvelope) string {
-	var ce xdr.ContractEvent
-	if xdr.SafeUnmarshal(evt.RawEvent, &ce) != nil {
-		return ""
-	}
-	v, ok := ce.Body.GetV0()
-	if !ok {
-		return ""
-	}
-	for _, t := range v.Topics {
-		if x := addr(t); strings.HasPrefix(x, "G") {
-			return x
-		}
-	}
-	return ""
 }
 
 // eventEra is one row of the per-wasm event-era table: whether the exact
@@ -252,16 +229,6 @@ var poolTypeEventClass = map[string]string{
 	"concentrated":     classPoolConcentrated,
 }
 
-// poolScopeEvents are pool-global events with no acting wallet in their
-// topics; they emit without an address instead of quarantining as user-less.
-var poolScopeEvents = map[string]struct{}{
-	"trade":           {},
-	"swap":            {},
-	"update_reserves": {},
-	"pool_state":      {},
-	"add_pool":        {},
-}
-
 // eventClass resolves the era table an event's contract speaks. The pools'
 // underlying token contracts (registered as asset contracts) speak the same
 // SEP-41 vocabulary as share tokens.
@@ -292,7 +259,7 @@ func (a *Adapter) quarantineEvent(evt bindings.RawEventEnvelope, reason string, 
 // on-chain name — the frozen aquarius_activities vocabulary. No keyword or
 // substring matching: an unknown name, an unclassifiable contract, or a name
 // observed before its era floor quarantines with a reason.
-func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser, class string) ([]bindings.Activity, []bindings.QuarantineEvent) {
+func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, class string) ([]bindings.Activity, []bindings.QuarantineEvent) {
 	var ce xdr.ContractEvent
 	if xdr.SafeUnmarshal(evt.RawEvent, &ce) != nil {
 		return nil, nil
@@ -318,33 +285,87 @@ func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser, 
 		// table's decision, never silently.
 		return nil, nil
 	}
-	addresses := []string{}
-	for _, t := range v.Topics {
-		if x := addr(t); x != "" {
-			addresses = append(addresses, x)
-		}
-	}
-	wallet := ""
-	for _, x := range addresses {
-		if strings.HasPrefix(x, "G") {
-			wallet = x
-			break
-		}
-	}
+	wallet, asset, amount := attributeActivity(class, name, v)
 	if wallet == "" {
-		wallet = fallbackUser
+		// A name with no acting wallet in its observed shape (pool-lifecycle
+		// and admin ops) is attributed to the emitting contract itself —
+		// never an empty address, never a same-transaction bystander.
+		wallet = evt.ContractID
 	}
-	if wallet == "" {
-		if _, poolScope := poolScopeEvents[name]; !poolScope {
-			return nil, a.quarantineEvent(evt, "aquarius_event_missing_user", map[string]string{"aquarius_event": name, "event_class": class})
+	return []bindings.Activity{{ID: stableID(a.cfg.Protocol, evt.LedgerSeq, evt.TxHash, evt.EventIndex, name), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Address: wallet, Protocol: a.cfg.Protocol, ActivityType: contracts.ActivityType(name), AssetID: asset, AmountRaw: amount, Timestamp: evt.CloseTime, Metadata: map[string]string{"aquarius_event": name, "event_class": class}}}, nil
+}
+
+// attributeActivity resolves one vocabulary-approved event's (wallet, asset,
+// amount) from its observed on-chain shape. Wallet and asset slots are fixed
+// topic/data positions per name — recorded as written, even when the slot
+// holds a contract (a router-initiated trade attributes to the router).
+// Amounts read a fixed index of the data VECTOR; a shape that does not match
+// its observation yields honest empties, never a scavenged nearby scalar.
+func attributeActivity(class, name string, v xdr.ContractEventV0) (wallet, asset, amount string) {
+	topicAddr := func(i int) string {
+		if i < len(v.Topics) {
+			return addr(v.Topics[i])
 		}
+		return ""
 	}
-	asset := ""
-	for _, x := range addresses {
-		if strings.HasPrefix(x, "C") && x != evt.ContractID {
-			asset = x
-			break
+	var data []xdr.ScVal
+	if vec, ok := v.Data.GetVec(); ok && vec != nil {
+		data = *vec
+	}
+	dataAddr := func(i int) string {
+		if i < len(data) {
+			return addr(data[i])
 		}
+		return ""
 	}
-	return []bindings.Activity{{ID: stableID(a.cfg.Protocol, evt.LedgerSeq, evt.TxHash, evt.EventIndex, name), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Address: wallet, Protocol: a.cfg.Protocol, ActivityType: contracts.ActivityType(name), AssetID: asset, AmountRaw: firstUint(v.Data), Timestamp: evt.CloseTime, Metadata: map[string]string{"aquarius_event": name, "event_class": class}}}, nil
+	dataAmount := func(i int) string {
+		if i < len(data) {
+			return eventAmount(data[i])
+		}
+		return ""
+	}
+	switch {
+	// Pool trade: topics [name, token_in, token_out, initiator];
+	// data [amount_in, amount_out, fee].
+	case name == "trade":
+		return topicAddr(3), topicAddr(1), dataAmount(0)
+	// Reward claim: topics [name, reward_token, owner]; data [amount].
+	case name == "claim_reward":
+		return topicAddr(2), topicAddr(1), dataAmount(0)
+	// Concentrated range mutation and fee collection carry the owner in
+	// topic 1; their data legs (tick bounds / two fee amounts) have no
+	// single token amount.
+	case name == "position_update" || name == "claim_fees":
+		return topicAddr(1), "", ""
+	// Router user ops: topics [name, tokens-vec, user] — multi-leg amounts
+	// stay unattributed.
+	case class == classRouter && (name == "deposit" || name == "withdraw"):
+		return topicAddr(2), "", ""
+	// Router swap: data [pool, token_in, token_out, in_amount, out_amount].
+	case class == classRouter && name == "swap":
+		return topicAddr(2), dataAddr(1), dataAmount(3)
+	// Router claim: data [pool, reward_token, amount].
+	case class == classRouter && name == "claim":
+		return topicAddr(2), dataAddr(1), dataAmount(2)
+	}
+	// Pool LP legs (deposit_liquidity/withdraw_liquidity), update_reserves,
+	// pool_state, add_pool, config_rewards, and any future vocabulary name
+	// without an attribution shape: no wallet, no asset, no amount.
+	return "", "", ""
+}
+
+// eventAmount renders one event-payload token amount. Only the two amount
+// shapes observed on-chain qualify (i128, and u128 within i128 range) — any
+// other value at an amount slot is a shape change and yields empty.
+func eventAmount(v xdr.ScVal) string {
+	if p, ok := v.GetI128(); ok {
+		return new(bigInt).i128(p)
+	}
+	if p, ok := v.GetU128(); ok {
+		if uint64(p.Hi)>>63 != 0 {
+			return ""
+		}
+		return new(bigInt).u128(p)
+	}
+	return ""
 }

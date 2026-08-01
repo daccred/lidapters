@@ -21,11 +21,13 @@ package aquarius
 //	  {to_claim 0, pool_accumulated 903562252135547}
 //	  -> pending AQUA at t = last_time: 484131964419179
 //	cce5 stable instance @63718535: Reserves [146555080, 652942],
-//	  TotalShares 135495039 ; gaca balance @60462775: 7672285
+//	  TotalShares 135495039, InitialA 1500 == FutureA 1500 (settled ramp
+//	  -> amplification 1500) ; gaca balance @60462775: 7672285
 //	  -> stable legs 8298549 EURx / 36972 EURC
 //	cbbm concentrated instance @63751196: Slot0 {sqrt_price_x96
 //	  32779403528916036142219842285, tick -17652}, Liquidity 177763135579314,
-//	  TickSpacing 20
+//	  TickSpacing 20, FeeGrowthGlobal0X128 4924211664902106266449896255854753808,
+//	  FeeGrowthGlobal1X128 996792946982382866094802424747882142
 //	Position(gaoa, -21880, -7980) L=23911740265087, owed 78216730/369599
 //	  -> in-range amounts (22159167791450, 1885240058815)
 //	Position(ga5k, -16560, -16480) L=5782465360699, owed 0/14649
@@ -186,6 +188,11 @@ func TestMainnetStableInstanceDecodeAndProRataAnchors(t *testing.T) {
 	if p.PoolType != "stable" || p.TotalSharesRaw != "135495039" || p.FeeFractionRaw != "10" {
 		t.Fatalf("stable pool %#v", p)
 	}
+	// InitialA == FutureA == 1500 (u128) in the raw instance: the ramp is
+	// settled, so the pool has exactly one amplification.
+	if p.AmplificationRaw != "1500" {
+		t.Fatalf("amplification %q, want the settled ramp value 1500", p.AmplificationRaw)
+	}
 	if len(p.Tokens) != 2 || p.Tokens[0].ReserveRaw != "146555080" || p.Tokens[1].ReserveRaw != "652942" {
 		t.Fatalf("stable reserves %#v", p.Tokens)
 	}
@@ -225,6 +232,18 @@ func TestMainnetConcentratedRangeDecodeAnchors(t *testing.T) {
 	}
 	if p.SqrtPriceX96 != "32779403528916036142219842285" || p.ActiveLiquidityRaw != "177763135579314" {
 		t.Fatalf("slot0/liquidity %q %q", p.SqrtPriceX96, p.ActiveLiquidityRaw)
+	}
+	// FeeGrowthGlobal{0,1}X128 are u256 X128 fixed-point accumulators; the
+	// expected decimals are byte walks of the raw instance value
+	// (0x03b45e6124c27d0ef023fc86b6283810 / 0x00bff9afc8996cd33c325f82ebf9769e).
+	if p.FeeGrowthGlobal0X128 != "4924211664902106266449896255854753808" {
+		t.Fatalf("fee growth 0 %q", p.FeeGrowthGlobal0X128)
+	}
+	if p.FeeGrowthGlobal1X128 != "996792946982382866094802424747882142" {
+		t.Fatalf("fee growth 1 %q", p.FeeGrowthGlobal1X128)
+	}
+	if p.AmplificationRaw != "" {
+		t.Fatalf("a concentrated pool has no amplification, got %q", p.AmplificationRaw)
 	}
 	if len(p.Tokens) != 2 || p.Tokens[0].AssetID != xlmSAC || p.Tokens[1].AssetID != usdcSAC ||
 		p.Tokens[0].ReserveRaw != "51409225147481" || p.Tokens[1].ReserveRaw != "4541883346199" {

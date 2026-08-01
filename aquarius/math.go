@@ -10,6 +10,97 @@ import (
 
 var q96 = new(big.Int).Lsh(big.NewInt(1), 96)
 
+// tickMagicLadder holds the Uniswap-v3 getSqrtRatioAtTick Q128.128 constants:
+// entry i is sqrt(1.0001)^-(2^i) in Q128.128. The concentrated pool wasm's
+// source is unfetchable (repo 404; SE-verified @ a22139a), so the ladder is
+// pinned empirically: summing the per-position decomposition over all live
+// positions of the pinned XLM/USDC pool reproduces the pool's own instance
+// reserves to within unattributed global fee growth (see testdata/REGISTRY.md).
+var tickMagicLadder = func() []*big.Int {
+	hexes := []string{
+		"fff97272373d413259a46990580e213a",
+		"fff2e50f5f656932ef12357cf3c7fdcc",
+		"ffe5caca7e10e4e61c3624eaa0941cd0",
+		"ffcb9843d60f6159c9db58835c926644",
+		"ff973b41fa98c081472e6896dfb254c0",
+		"ff2ea16466c96a3843ec78b326b52861",
+		"fe5dee046a99a2a811c461f1969c3053",
+		"fcbe86c7900a88aedcffc83b479aa3a4",
+		"f987a7253ac413176f2b074cf7815e54",
+		"f3392b0822b70005940c7a398e4b70f3",
+		"e7159475a2c29b7443b29c7fa6e889d9",
+		"d097f3bdfd2022b8845ad8f792aa5825",
+		"a9f746462d870fdf8a65dc1f90e061e5",
+		"70d869a156d2a1b890bb3df62baf32f7",
+		"31be135f97d08fd981231505542fcfa6",
+		"9aa508b5b7a84e1c677de54f3e99bc9",
+		"5d6af8dedb81196699c329225ee604",
+		"2216e584f5fa1ea926041bedfe98",
+		"48a170391f7dc42444e8fa2",
+	}
+	out := make([]*big.Int, len(hexes))
+	for i, h := range hexes {
+		n, ok := new(big.Int).SetString(h, 16)
+		if !ok {
+			panic("aquarius: bad tick ladder constant")
+		}
+		out[i] = n
+	}
+	return out
+}()
+
+var (
+	tickOddMagic = mustHexBig("fffcb933bd6fad37aa2d162d1a594001")
+	q128         = new(big.Int).Lsh(big.NewInt(1), 128)
+	q256         = new(big.Int).Lsh(big.NewInt(1), 256)
+)
+
+func mustHexBig(h string) *big.Int {
+	n, ok := new(big.Int).SetString(h, 16)
+	if !ok {
+		panic("aquarius: bad hex constant")
+	}
+	return n
+}
+
+const maxTick = 887272
+
+// tickSqrtPriceX96 converts a tick to its Q64.96 square-root price — the
+// bounds rangePrincipal consumes. Concentrated Position entries key on
+// (owner, tick_lower, tick_upper); their sqrt-price bounds are never stored
+// on-chain, so the fold derives them here. Anchor: tick -17652 yields
+// 32778602836627082880087502758, which brackets the pinned pool's observed
+// Slot0.sqrt_price_x96 = 32779403528916036142219842285 from below.
+func tickSqrtPriceX96(tick int32) (string, error) {
+	abs := uint32(tick)
+	if tick < 0 {
+		abs = uint32(-int64(tick))
+	}
+	if abs > maxTick {
+		return "", fmt.Errorf("tick %d out of range", tick)
+	}
+	ratio := new(big.Int).Set(q128)
+	if abs&1 != 0 {
+		ratio.Set(tickOddMagic)
+	}
+	for i, magic := range tickMagicLadder {
+		if abs&(1<<(uint(i)+1)) != 0 {
+			ratio.Mul(ratio, magic)
+			ratio.Rsh(ratio, 128)
+		}
+	}
+	if tick > 0 {
+		ratio.Div(q256, ratio)
+	}
+	// Q128.128 -> Q64.96, rounding up like the reference implementation.
+	rem := new(big.Int)
+	ratio.DivMod(ratio, new(big.Int).Lsh(big.NewInt(1), 32), rem)
+	if rem.Sign() != 0 {
+		ratio.Add(ratio, big.NewInt(1))
+	}
+	return ratio.String(), nil
+}
+
 func parseUint(s string) (*big.Int, error) {
 	n, ok := new(big.Int).SetString(s, 10)
 	if !ok || n.Sign() < 0 {

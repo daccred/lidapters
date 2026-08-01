@@ -39,6 +39,10 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 	for _, pos := range in.State.AMMPositions {
 		pool, ok := pools[pos.PoolContractID]
 		if !ok {
+			// A position whose pool never folded (bounded replay without the
+			// pool's instance write or seed) cannot be decomposed — but it
+			// must not vanish silently. Quarantine, don't drop.
+			out.Quarantine = append(out.Quarantine, bindings.QuarantineEvent{ID: stableID(a.ID(), pos.PoolContractID, pos.Address, in.LedgerSeq), AdapterID: a.ID(), LedgerSeq: in.LedgerSeq, ContractID: pos.PoolContractID, Reason: "aquarius_position_unknown_pool"})
 			continue
 		}
 		group := stableID(a.cfg.Protocol, pos.Address, pos.PoolContractID, pos.TickLower, pos.TickUpper)
@@ -72,7 +76,7 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 		}
 	}
 	for _, evt := range in.Events {
-		acts, qs := a.decodeActivities(evt, txUsers[evt.TxHash])
+		acts, qs := a.decodeActivities(evt, txUsers[evt.TxHash], a.eventClass(evt.ContractID, pools))
 		out.Activities = append(out.Activities, acts...)
 		out.Quarantine = append(out.Quarantine, qs...)
 	}
@@ -92,12 +96,22 @@ func appendRangeComponents(out *bindings.TransformOutput, group string, p bindin
 	if len(pool.Tokens) < 2 {
 		return
 	}
+	lo, hi := p.TickLower, p.TickUpper
+	if p.LiquidityRaw == "0" && p.HadShares {
+		// Closed range position (liquidity written or removed to zero):
+		// explicit zero tombstones, mirroring the classic-LP close path.
+		// HadShares distinguishes a real close from a never-held range;
+		// absent liquidity ("") stays silent — absent is not zero.
+		for i := 0; i < 2; i++ {
+			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", "0", "0", &lo, &hi, in, true))
+		}
+		return
+	}
 	if p.Principal0Raw == "" && p.Principal1Raw == "" && p.LiquidityRaw != "" && pool.SqrtPriceX96 != "" && p.SqrtPriceLowerX96 != "" && p.SqrtPriceUpperX96 != "" {
 		if x, y, err := rangePrincipal(p.LiquidityRaw, pool.SqrtPriceX96, p.SqrtPriceLowerX96, p.SqrtPriceUpperX96); err == nil {
 			p.Principal0Raw, p.Principal1Raw = x, y
 		}
 	}
-	lo, hi := p.TickLower, p.TickUpper
 	for i, x := range []string{p.Principal0Raw, p.Principal1Raw} {
 		if x != "" && x != "0" {
 			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", x, p.LiquidityRaw, &lo, &hi, in, false))
@@ -127,7 +141,158 @@ func eventUser(evt bindings.RawEventEnvelope) string {
 	return ""
 }
 
-func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser string) ([]bindings.Activity, []bindings.QuarantineEvent) {
+// eventEra is one row of the per-wasm event-era table: whether the exact
+// event name is a served activity, and the first ledger the name was observed
+// on-chain for its contract class. The tables below mirror the deployment
+// data in relay.rs deployments/aquarius.pubnet.toml character-exactly — the
+// single source of truth shared by the relay wing, this package and the
+// serving layer. The vocabulary only ever GREW across wasm upgrades, so one
+// floor per (class, name) is a faithful era encoding. A name outside its
+// class's table, or seen before its floor, quarantines loudly: the fix is a
+// new table row (data), never a keyword match (code).
+type eventEra struct {
+	activity   bool
+	fromLedger int64
+}
+
+// Event classes. Pools split by pool type because each wasm lineage carries
+// its own vocabulary; share tokens (and the pools' underlying token
+// contracts) speak SEP-41, whose events are recognized non-activities — LP
+// position state rides Balance WRITES, not token events.
+const (
+	classRouter           = "router"
+	classPoolCP           = "pool_cp"
+	classPoolStable       = "pool_stable"
+	classPoolConcentrated = "pool_concentrated"
+	classShareToken       = "share_token"
+)
+
+var eventErasByClass = map[string]map[string]eventEra{
+	classRouter: {
+		"add_pool":                  {activity: true, fromLedger: 52728530},
+		"deposit":                   {activity: true, fromLedger: 52728548},
+		"swap":                      {activity: true, fromLedger: 52728694},
+		"withdraw":                  {activity: true, fromLedger: 52728753},
+		"claim":                     {activity: true, fromLedger: 53554212},
+		"config_rewards":            {activity: true, fromLedger: 53788765},
+		"commit_transfer_ownership": {activity: false, fromLedger: 55363698},
+		"apply_transfer_ownership":  {activity: false, fromLedger: 55363729},
+		"set_privileged_addrs":      {activity: false, fromLedger: 55363632},
+		"commit_upgrade":            {activity: false, fromLedger: 56429464},
+		"apply_upgrade":             {activity: false, fromLedger: 56505099},
+		"set_protocol_fee":          {activity: false, fromLedger: 57711843},
+		"pool_gauge_switch_token":   {activity: false, fromLedger: 58787667},
+	},
+	classPoolCP: {
+		"deposit_liquidity":             {activity: true, fromLedger: 52728548},
+		"trade":                         {activity: true, fromLedger: 52728694},
+		"withdraw_liquidity":            {activity: true, fromLedger: 52728753},
+		"claim_reward":                  {activity: true, fromLedger: 55364200},
+		"update_reserves":               {activity: true, fromLedger: 57724992},
+		"kill_claim":                    {activity: false, fromLedger: 53446148},
+		"unkill_claim":                  {activity: false, fromLedger: 53553379},
+		"set_privileged_addrs":          {activity: false, fromLedger: 55363632},
+		"commit_transfer_ownership":     {activity: false, fromLedger: 55363698},
+		"apply_transfer_ownership":      {activity: false, fromLedger: 55363729},
+		"set_rewards_config":            {activity: false, fromLedger: 55363850},
+		"commit_upgrade":                {activity: false, fromLedger: 56429489},
+		"apply_upgrade":                 {activity: false, fromLedger: 56505152},
+		"set_protocol_fee":              {activity: false, fromLedger: 57725741},
+		"claim_protocol_fee":            {activity: false, fromLedger: 57812875},
+		"rewards_gauge_add":             {activity: false, fromLedger: 58961340},
+		"rewards_gauge_schedule_reward": {activity: false, fromLedger: 58961340},
+		"rewards_gauge_claim":           {activity: false, fromLedger: 58961606},
+		"reserves_sync":                 {activity: false, fromLedger: 62338454},
+		"set_rewards_state":             {activity: false, fromLedger: 62460053},
+	},
+	classPoolStable: {
+		"deposit_liquidity":         {activity: true, fromLedger: 53721288},
+		"trade":                     {activity: true, fromLedger: 53752457},
+		"withdraw_liquidity":        {activity: true, fromLedger: 54357611},
+		"claim_reward":              {activity: true, fromLedger: 55364553},
+		"update_reserves":           {activity: true, fromLedger: 57711655},
+		"set_privileged_addrs":      {activity: false, fromLedger: 55363632},
+		"commit_transfer_ownership": {activity: false, fromLedger: 55363698},
+		"apply_transfer_ownership":  {activity: false, fromLedger: 55363729},
+		"set_rewards_config":        {activity: false, fromLedger: 55363874},
+		"commit_upgrade":            {activity: false, fromLedger: 56429464},
+		"apply_upgrade":             {activity: false, fromLedger: 56505116},
+		"set_protocol_fee":          {activity: false, fromLedger: 57711843},
+		"claim_protocol_fee":        {activity: false, fromLedger: 58023965},
+	},
+	classPoolConcentrated: {
+		"deposit_liquidity":      {activity: true, fromLedger: 62341770},
+		"pool_state":             {activity: true, fromLedger: 62341770},
+		"position_update":        {activity: true, fromLedger: 62341770},
+		"update_reserves":        {activity: true, fromLedger: 62341770},
+		"trade":                  {activity: true, fromLedger: 62341787},
+		"withdraw_liquidity":     {activity: true, fromLedger: 62342165},
+		"claim_fees":             {activity: true, fromLedger: 62343467},
+		"claim_reward":           {activity: true, fromLedger: 62350500},
+		"commit_upgrade":         {activity: false, fromLedger: 62429301},
+		"claim_protocol_fee":     {activity: false, fromLedger: 62440492},
+		"apply_upgrade":          {activity: false, fromLedger: 62475394},
+		"enable_emergency_mode":  {activity: false, fromLedger: 62877434},
+		"disable_emergency_mode": {activity: false, fromLedger: 62877804},
+		"set_rewards_state":      {activity: false, fromLedger: 63082253},
+	},
+	classShareToken: {
+		"mint":     {activity: false, fromLedger: 53553264},
+		"burn":     {activity: false, fromLedger: 53555897},
+		"transfer": {activity: false, fromLedger: 53738883},
+		"approve":  {activity: false, fromLedger: 60433173},
+	},
+}
+
+// poolTypeEventClass maps a decoded pool type to its event class. Only exact,
+// affirmatively decoded pool types classify; anything else quarantines.
+var poolTypeEventClass = map[string]string{
+	"constant_product": classPoolCP,
+	"stable":           classPoolStable,
+	"concentrated":     classPoolConcentrated,
+}
+
+// poolScopeEvents are pool-global events with no acting wallet in their
+// topics; they emit without an address instead of quarantining as user-less.
+var poolScopeEvents = map[string]struct{}{
+	"trade":           {},
+	"swap":            {},
+	"update_reserves": {},
+	"pool_state":      {},
+	"add_pool":        {},
+}
+
+// eventClass resolves the era table an event's contract speaks. The pools'
+// underlying token contracts (registered as asset contracts) speak the same
+// SEP-41 vocabulary as share tokens.
+func (a *Adapter) eventClass(contractID string, pools map[string]bindings.AMMPoolState) string {
+	if _, ok := a.cfg.Routers[contractID]; ok {
+		return classRouter
+	}
+	if _, ok := a.shareTokens[contractID]; ok {
+		return classShareToken
+	}
+	if _, ok := a.assets[contractID]; ok {
+		return classShareToken
+	}
+	if p, ok := pools[contractID]; ok {
+		if class, ok := poolTypeEventClass[p.PoolType]; ok {
+			return class
+		}
+	}
+	return ""
+}
+
+func (a *Adapter) quarantineEvent(evt bindings.RawEventEnvelope, reason string, metadata map[string]string) []bindings.QuarantineEvent {
+	return []bindings.QuarantineEvent{{ID: stableID(a.ID(), evt.LedgerSeq, evt.TxHash, evt.EventIndex), AdapterID: a.ID(), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Reason: reason, RawEvent: evt.RawEvent, Metadata: metadata}}
+}
+
+// decodeActivities classifies one contract event by exact name against its
+// contract class's era table and emits the activity under that exact
+// on-chain name — the frozen aquarius_activities vocabulary. No keyword or
+// substring matching: an unknown name, an unclassifiable contract, or a name
+// observed before its era floor quarantines with a reason.
+func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser, class string) ([]bindings.Activity, []bindings.QuarantineEvent) {
 	var ce xdr.ContractEvent
 	if xdr.SafeUnmarshal(evt.RawEvent, &ce) != nil {
 		return nil, nil
@@ -136,22 +301,21 @@ func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser s
 	if !ok || len(v.Topics) == 0 {
 		return nil, nil
 	}
-	name := strings.ToLower(symbolOrFirst(v.Topics[0]))
-	typ := contracts.ActivityType("")
-	switch name {
-	case "deposit", "deposit_liquidity":
-		typ = "add_liquidity"
-	case "withdraw", "withdraw_liquidity":
-		typ = "remove_liquidity"
-	case "trade", "swap":
-		typ = "swap"
-	case "claim", "claim_reward":
-		typ = contracts.ActivityTypeClaimRewards
-	case "claim_fees":
-		typ = "claim_fees"
-	case "position_update":
-		typ = "range_liquidity_change"
-	default:
+	name := symbolOrFirst(v.Topics[0])
+	eras, classified := eventErasByClass[class]
+	if !classified {
+		return nil, a.quarantineEvent(evt, "aquarius_event_unclassified_contract", map[string]string{"aquarius_event": name})
+	}
+	era, known := eras[name]
+	if !known {
+		return nil, a.quarantineEvent(evt, "aquarius_event_unknown_name", map[string]string{"aquarius_event": name, "event_class": class})
+	}
+	if evt.LedgerSeq < era.fromLedger {
+		return nil, a.quarantineEvent(evt, "aquarius_event_before_era_floor", map[string]string{"aquarius_event": name, "event_class": class})
+	}
+	if !era.activity {
+		// Recognized non-activity (admin/lifecycle/SEP-41): excluded by the
+		// table's decision, never silently.
 		return nil, nil
 	}
 	addresses := []string{}
@@ -170,8 +334,10 @@ func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser s
 	if wallet == "" {
 		wallet = fallbackUser
 	}
-	if wallet == "" && name != "trade" {
-		return nil, []bindings.QuarantineEvent{{ID: stableID(a.ID(), evt.LedgerSeq, evt.TxHash, evt.EventIndex), AdapterID: a.ID(), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Reason: "aquarius_event_missing_user", RawEvent: evt.RawEvent}}
+	if wallet == "" {
+		if _, poolScope := poolScopeEvents[name]; !poolScope {
+			return nil, a.quarantineEvent(evt, "aquarius_event_missing_user", map[string]string{"aquarius_event": name, "event_class": class})
+		}
 	}
 	asset := ""
 	for _, x := range addresses {
@@ -180,5 +346,5 @@ func (a *Adapter) decodeActivities(evt bindings.RawEventEnvelope, fallbackUser s
 			break
 		}
 	}
-	return []bindings.Activity{{ID: stableID(a.cfg.Protocol, evt.LedgerSeq, evt.TxHash, evt.EventIndex, name), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Address: wallet, Protocol: a.cfg.Protocol, ActivityType: typ, AssetID: asset, AmountRaw: firstUint(v.Data), Timestamp: evt.CloseTime, Metadata: map[string]string{"aquarius_event": name}}}, nil
+	return []bindings.Activity{{ID: stableID(a.cfg.Protocol, evt.LedgerSeq, evt.TxHash, evt.EventIndex, name), LedgerSeq: evt.LedgerSeq, TxHash: evt.TxHash, EventIndex: evt.EventIndex, ContractID: evt.ContractID, Address: wallet, Protocol: a.cfg.Protocol, ActivityType: contracts.ActivityType(name), AssetID: asset, AmountRaw: firstUint(v.Data), Timestamp: evt.CloseTime, Metadata: map[string]string{"aquarius_event": name, "event_class": class}}}, nil
 }

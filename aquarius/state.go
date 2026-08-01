@@ -13,10 +13,16 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
+// diagMissingTickBounds marks a concentrated Position entry whose key lacked
+// decodable (tick_lower, tick_upper) bounds: the fold refuses to key it as a
+// guessed (0, 0) range and surfaces the refusal instead (absent is not zero).
+const diagMissingTickBounds = "aquarius_position_missing_tick_bounds"
+
 // DecodeState is a pure delta fold. JSON values are supported for audited
 // fixtures; production entries are decoded from ScVal XDR maps/vectors.
 func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64) (*bindings.LedgerState, error) {
 	next := cloneState(prior)
+	a.diagnostics = nil
 	pools := map[string]bindings.AMMPoolState{}
 	for _, p := range next.AMMPools {
 		pools[p.ContractID] = p
@@ -31,12 +37,7 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			continue
 		}
 		if c.ValueXDR == nil || !c.Live || (c.LiveUntilLedgerSeq != nil && *c.LiveUntilLedgerSeq < uint32(ledgerSeq)) {
-			delete(pools, c.ContractID)
-			for k, p := range positions {
-				if p.PoolContractID == c.ContractID {
-					delete(positions, k)
-				}
-			}
+			a.applyEntryRemoval(c, pools, positions)
 			continue
 		}
 		key, _ := decodeVal(c.KeyXDR)
@@ -45,6 +46,18 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			continue
 		}
 		name := strings.ToLower(symbolOrFirst(key))
+		if poolID, isShare := a.shareTokens[c.ContractID]; isShare {
+			// LP position state rides Balance writes on the pool's share
+			// token; the balance folds as a position of the owning pool.
+			if name == "balance" {
+				if owner := addrInKey(key); owner != "" {
+					if shares := firstUint(val); shares != "" {
+						upsertClassicShares(positions, poolID, owner, shares)
+					}
+				}
+			}
+			continue
+		}
 		if _, isAsset := a.assets[c.ContractID]; isAsset {
 			if m, ok := assetMetadata(c.ContractID, key, val); ok {
 				upsertAsset(&next.AMMAssets, m)
@@ -65,14 +78,24 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 						p.PoolType = strings.ToLower(symbolOrFirst(entry.Val))
 					case "router":
 						p.RouterContract = addr(entry.Val)
-					case "tokena":
+					case "tokena", "token0":
 						upsertToken(&p.Tokens, 0, addr(entry.Val), "")
-					case "tokenb":
+					case "tokenb", "token1":
 						upsertToken(&p.Tokens, 1, addr(entry.Val), "")
-					case "reservea":
+					case "reservea", "reserve0":
 						upsertToken(&p.Tokens, 0, "", firstUint(entry.Val))
-					case "reserveb":
+					case "reserveb", "reserve1":
 						upsertToken(&p.Tokens, 1, "", firstUint(entry.Val))
+					case "tickspacing":
+						fmt.Sscan(firstUint(entry.Val), &p.TickSpacing)
+					case "liquidity":
+						// Concentrated instance key: the pool's active
+						// (in-range) liquidity.
+						p.ActiveLiquidityRaw = firstUint(entry.Val)
+					case "tokenshare":
+						if id := addr(entry.Val); id != "" {
+							a.shareTokens[id] = c.ContractID
+						}
 					case "tokens":
 						p.Tokens = decodeReserves(p.Tokens, entry.Val)
 					case "reserves":
@@ -114,31 +137,57 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			decodeSlot0(&p, val)
 		case "active_liquidity":
 			p.ActiveLiquidityRaw = firstUint(val)
-		case "position", "positions", "balance", "workingbalance":
-			if pos, ok := decodePosition(c.ContractID, key, val); ok {
-				current := positions[positionKey(pos)]
-				if current.Address == "" {
-					current = pos
-				} else {
-					current.SharesRaw = pos.SharesRaw
-					current.LiquidityRaw = pos.LiquidityRaw
-					current.SqrtPriceLowerX96 = pos.SqrtPriceLowerX96
-					current.SqrtPriceUpperX96 = pos.SqrtPriceUpperX96
-					current.TickLower = pos.TickLower
-					current.TickUpper = pos.TickUpper
-					current.PendingFee0Raw = pos.PendingFee0Raw
-					current.PendingFee1Raw = pos.PendingFee1Raw
+		case "workingbalance":
+			// The WorkingBalance entry value is the checkpointed reward
+			// weight (ICE boost scales it within [0.4x, 1.0x] of the
+			// deposit) — it is NOT the share balance and must never
+			// overwrite SharesRaw.
+			if owner := addrInKey(key); owner != "" {
+				if weight := firstUint(val); weight != "" {
+					k := positionKey(bindings.AMMPositionState{PoolContractID: c.ContractID, Address: owner})
+					current, exists := positions[k]
+					if !exists {
+						current = bindings.AMMPositionState{Address: owner, PoolContractID: c.ContractID}
+					}
+					current.WorkingBalanceRaw = weight
+					positions[k] = current
 				}
-				if name == "workingbalance" && pos.SharesRaw != "" {
-					// The WorkingBalance entry value is the checkpointed reward
-					// weight itself, decoded by decodePosition as a plain uint.
-					current.WorkingBalanceRaw = pos.SharesRaw
-				}
-				if current.SharesRaw != "" && current.SharesRaw != "0" {
-					current.HadShares = true
-				}
-				positions[positionKey(current)] = current
 			}
+		case "position", "positions", "balance":
+			pos, ok := decodePosition(c.ContractID, key, val)
+			if !ok {
+				if symbolOrFirst(key) == "Position" && pos.Address != "" {
+					// A range Position key whose (tick_lower, tick_upper)
+					// bounds did not decode must never fold as a guessed
+					// (0, 0) range — absent is not zero. Refuse the entry
+					// and surface the refusal.
+					a.diagnostics = append(a.diagnostics, bindings.DecodeDiagnostic{
+						Code:           diagMissingTickBounds,
+						LedgerSeq:      ledgerSeq,
+						PoolContractID: c.ContractID,
+						Address:        pos.Address,
+					})
+				}
+				break
+			}
+			current := positions[positionKey(pos)]
+			if current.Address == "" {
+				current = pos
+			} else {
+				current.SharesRaw = pos.SharesRaw
+				current.LiquidityRaw = pos.LiquidityRaw
+				current.SqrtPriceLowerX96 = pos.SqrtPriceLowerX96
+				current.SqrtPriceUpperX96 = pos.SqrtPriceUpperX96
+				current.TickLower = pos.TickLower
+				current.TickUpper = pos.TickUpper
+				current.PendingFee0Raw = pos.PendingFee0Raw
+				current.PendingFee1Raw = pos.PendingFee1Raw
+			}
+			if (current.SharesRaw != "" && current.SharesRaw != "0") ||
+				(current.LiquidityRaw != "" && current.LiquidityRaw != "0") {
+				current.HadShares = true
+			}
+			positions[positionKey(current)] = current
 		case "userrewarddata":
 			if pos, ok := decodeRewardPosition(c.ContractID, key, val); ok {
 				current := positions[positionKey(pos)]
@@ -152,18 +201,7 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 		default:
 			if user := addr(key); user != "" {
 				if shares := firstUint(val); shares != "" {
-					pos := bindings.AMMPositionState{Address: user, PoolContractID: c.ContractID, SharesRaw: shares}
-					key := positionKey(pos)
-					if current, ok := positions[key]; ok {
-						pos.HadShares = current.HadShares
-						if pos.PendingRewardRaw == "" {
-							pos.PendingRewardRaw = current.PendingRewardRaw
-						}
-					}
-					if pos.SharesRaw != "0" {
-						pos.HadShares = true
-					}
-					positions[key] = pos
+					upsertClassicShares(positions, c.ContractID, user, shares)
 				}
 			}
 		}
@@ -269,6 +307,112 @@ func (a *Adapter) applyPoolSeeds(pools map[string]bindings.AMMPoolState, positio
 	}
 }
 
+// applyEntryRemoval folds an entry deletion/eviction/expiry. Only an
+// instance-level removal tears the whole pool down; a removed per-user entry
+// closes exactly that user's leg. A Balance/Position entry is deleted on full
+// exit, so its position zeroes (HadShares survives, letting Transform emit
+// the close tombstones), and a removed reward checkpoint zeroes only the
+// pending claim. Before this refinement any removed entry deleted the pool
+// and every position in it.
+func (a *Adapter) applyEntryRemoval(c bindings.ContractDataChange, pools map[string]bindings.AMMPoolState, positions map[string]bindings.AMMPositionState) {
+	poolID := c.ContractID
+	if mapped, isShare := a.shareTokens[c.ContractID]; isShare {
+		poolID = mapped
+	}
+	if key, ok := decodeVal(c.KeyXDR); ok {
+		switch strings.ToLower(symbolOrFirst(key)) {
+		case "balance", "position", "positions":
+			probe := bindings.AMMPositionState{PoolContractID: poolID, Address: addrInKey(key)}
+			if probe.Address == "" {
+				return
+			}
+			if lo, hi, ok := ticksInKey(key); ok {
+				probe.TickLower, probe.TickUpper = lo, hi
+			}
+			k := positionKey(probe)
+			if current, exists := positions[k]; exists {
+				current.SharesRaw = "0"
+				current.LiquidityRaw = "0"
+				current.Principal0Raw = ""
+				current.Principal1Raw = ""
+				current.PendingFee0Raw = ""
+				current.PendingFee1Raw = ""
+				positions[k] = current
+			}
+			return
+		case "userrewarddata":
+			probe := bindings.AMMPositionState{PoolContractID: poolID, Address: addrInKey(key)}
+			if probe.Address == "" {
+				return
+			}
+			k := positionKey(probe)
+			if current, exists := positions[k]; exists {
+				current.PendingRewardRaw = "0"
+				current.RewardPoolAccumulatedRaw = ""
+				positions[k] = current
+			}
+			return
+		case "workingbalance", "user":
+			return
+		}
+	}
+	// Instance-level (or undecodable-key) removal: the pool itself is gone.
+	delete(pools, c.ContractID)
+	for k, p := range positions {
+		if p.PoolContractID == c.ContractID {
+			delete(positions, k)
+		}
+	}
+}
+
+// upsertClassicShares folds a share-balance write into the classic (untick'd)
+// position for (pool, owner), preserving previously folded reward state.
+func upsertClassicShares(positions map[string]bindings.AMMPositionState, poolID, owner, shares string) {
+	pos := bindings.AMMPositionState{Address: owner, PoolContractID: poolID}
+	k := positionKey(pos)
+	if current, ok := positions[k]; ok {
+		pos = current
+	}
+	pos.SharesRaw = shares
+	if shares != "0" {
+		pos.HadShares = true
+	}
+	positions[k] = pos
+}
+
+func addrInKey(key xdr.ScVal) string {
+	if a := addr(key); a != "" {
+		return a
+	}
+	if vec, ok := key.GetVec(); ok && vec != nil {
+		for _, x := range *vec {
+			if a := addr(x); a != "" {
+				return a
+			}
+		}
+	}
+	return ""
+}
+
+// ticksInKey extracts the (tick_lower, tick_upper) bounds a concentrated
+// Position entry carries in its KEY vector — `Position(owner, i32, i32)`.
+func ticksInKey(key xdr.ScVal) (int32, int32, bool) {
+	vec, ok := key.GetVec()
+	if !ok || vec == nil {
+		return 0, 0, false
+	}
+	ticks := make([]int32, 0, 2)
+	for _, x := range *vec {
+		if i, ok := x.GetI32(); ok {
+			ticks = append(ticks, int32(i))
+		}
+	}
+	if len(ticks) != 2 {
+		return 0, 0, false
+	}
+	return ticks[0], ticks[1], true
+}
+
 func cloneState(s *bindings.LedgerState) *bindings.LedgerState {
 	if s == nil {
 		return &bindings.LedgerState{}
@@ -321,6 +465,9 @@ func firstUint(v xdr.ScVal) string {
 	if i, ok := v.GetI128(); ok {
 		return new(bigInt).i128(i)
 	}
+	if u, ok := v.GetU256(); ok {
+		return new(bigInt).u256(u)
+	}
 	if u, ok := v.GetU64(); ok {
 		return fmt.Sprint(uint64(u))
 	}
@@ -329,6 +476,9 @@ func firstUint(v xdr.ScVal) string {
 	}
 	if i, ok := v.GetI64(); ok {
 		return fmt.Sprint(int64(i))
+	}
+	if i, ok := v.GetI32(); ok {
+		return fmt.Sprint(int32(i))
 	}
 	if vec, ok := v.GetVec(); ok && vec != nil {
 		for _, x := range *vec {
@@ -345,6 +495,14 @@ type bigInt struct{}
 func (*bigInt) u128(v xdr.UInt128Parts) string { return newBig(uint64(v.Hi), uint64(v.Lo), false) }
 func (*bigInt) i128(v xdr.Int128Parts) string {
 	return newBig(uint64(v.Hi), uint64(v.Lo), int64(v.Hi) < 0)
+}
+func (*bigInt) u256(v xdr.UInt256Parts) string {
+	n := new(big.Int).SetUint64(uint64(v.HiHi))
+	for _, part := range []uint64{uint64(v.HiLo), uint64(v.LoHi), uint64(v.LoLo)} {
+		n.Lsh(n, 64)
+		n.Or(n, new(big.Int).SetUint64(part))
+	}
+	return n.String()
 }
 func newBig(hi, lo uint64, neg bool) string {
 	n := new(big.Int).SetUint64(hi)
@@ -395,15 +553,18 @@ func decodeReserves(old []bindings.AMMTokenReserve, v xdr.ScVal) []bindings.AMMT
 	}
 	out := make([]bindings.AMMTokenReserve, 0, len(*vec))
 	for i, x := range *vec {
-		if id := addr(x); id != "" {
-			out = append(out, bindings.AMMTokenReserve{AssetID: id})
-			continue
-		}
+		// Tokens (address vec) and Reserves (uint vec) are separate storage
+		// entries folded in either order; each pass fills its own column and
+		// preserves the other's.
 		r := bindings.AMMTokenReserve{}
 		if i < len(old) {
 			r = old[i]
 		}
-		r.ReserveRaw = firstUint(x)
+		if id := addr(x); id != "" {
+			r.AssetID = id
+		} else {
+			r.ReserveRaw = firstUint(x)
+		}
 		out = append(out, r)
 	}
 	return out
@@ -423,17 +584,14 @@ func decodeSlot0(p *bindings.AMMPoolState, v xdr.ScVal) {
 	f := fields(v)
 	p.SqrtPriceX96 = firstUint(f["sqrt_price_x96"])
 	fmt.Sscan(firstUint(f["tick"]), &p.CurrentTick)
-	p.ActiveLiquidityRaw = firstUint(f["active_liquidity"])
+	if x := firstUint(f["active_liquidity"]); x != "" {
+		// The concentrated instance stores active liquidity under its own
+		// Liquidity key; only overwrite it when Slot0 actually carries one.
+		p.ActiveLiquidityRaw = x
+	}
 }
 func decodePosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState, bool) {
-	p := bindings.AMMPositionState{PoolContractID: pool}
-	if vec, ok := key.GetVec(); ok && vec != nil {
-		for _, x := range *vec {
-			if a := addr(x); a != "" {
-				p.Address = a
-			}
-		}
-	}
+	p := bindings.AMMPositionState{PoolContractID: pool, Address: addrInKey(key)}
 	f := fields(val)
 	p.SharesRaw = firstUint(f["shares"])
 	if p.SharesRaw == "" {
@@ -446,6 +604,27 @@ func decodePosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState,
 	fmt.Sscan(firstUint(f["tick_upper"]), &p.TickUpper)
 	p.PendingFee0Raw = firstUint(f["tokens_owed_0"])
 	p.PendingFee1Raw = firstUint(f["tokens_owed_1"])
+	if symbolOrFirst(key) == "Position" {
+		// Concentrated ranges key on (owner, tick_lower, tick_upper) — the
+		// bounds live in the entry KEY, not the value (D-05 keying). A
+		// Position key without both bounds must not fold: a guessed (0, 0)
+		// range would collide distinct ranges of one owner.
+		lo, hi, ok := ticksInKey(key)
+		if !ok {
+			return p, false
+		}
+		p.TickLower, p.TickUpper = lo, hi
+		if p.SqrtPriceLowerX96 == "" {
+			if x, err := tickSqrtPriceX96(lo); err == nil {
+				p.SqrtPriceLowerX96 = x
+			}
+		}
+		if p.SqrtPriceUpperX96 == "" {
+			if x, err := tickSqrtPriceX96(hi); err == nil {
+				p.SqrtPriceUpperX96 = x
+			}
+		}
+	}
 	return p, p.Address != ""
 }
 func decodeRewardPosition(pool string, key, val xdr.ScVal) (bindings.AMMPositionState, bool) {

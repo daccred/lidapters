@@ -51,11 +51,26 @@ type Adapter struct {
 	cfg       Config
 	contracts map[string]struct{}
 	assets    map[string]struct{}
+	// shareTokens maps a pool's LP share-token contract to its pool. The
+	// mapping is discovered from the pool instance's TokenShare entry; LP
+	// position state rides Balance writes on the share token, so those
+	// contracts are owned and their balances fold as positions of the pool.
+	shareTokens map[string]string
+	// diagnostics records entries the fold refused to guess about (e.g. a
+	// concentrated Position key without decodable tick bounds), overwritten
+	// by each DecodeState call. See bindings.DecodeDiagnosticsProvider.
+	diagnostics []bindings.DecodeDiagnostic
 }
 
 var _ bindings.ProtocolAdapter = (*Adapter)(nil)
 var _ bindings.StateReporter = (*Adapter)(nil)
 var _ bindings.AssetRegistrar = (*Adapter)(nil)
+var _ bindings.DecodeDiagnosticsProvider = (*Adapter)(nil)
+
+// LastDecodeDiagnostics reports the entries the most recent DecodeState call
+// refused to fold rather than guess about. Same single-fold-at-a-time
+// contract as the interface documents: read immediately after folding.
+func (a *Adapter) LastDecodeDiagnostics() []bindings.DecodeDiagnostic { return a.diagnostics }
 
 // New preserves the original scaffold constructor for downstream callers.
 func New() *Adapter { a, _ := NewWithConfig(Config{}); return a }
@@ -81,7 +96,7 @@ func NewWithConfig(config Config) (*Adapter, error) {
 	if cfg.AdapterID == "" || cfg.Protocol == "" {
 		return nil, fmt.Errorf("aquarius: adapter id and protocol are required")
 	}
-	a := &Adapter{cfg: cfg, contracts: map[string]struct{}{}, assets: map[string]struct{}{}}
+	a := &Adapter{cfg: cfg, contracts: map[string]struct{}{}, assets: map[string]struct{}{}, shareTokens: map[string]string{}}
 	for id := range cfg.Routers {
 		a.contracts[id] = struct{}{}
 	}
@@ -100,11 +115,13 @@ func copySet(in map[string]struct{}) map[string]struct{} {
 func (a *Adapter) ID() string       { return a.cfg.AdapterID }
 func (a *Adapter) Protocol() string { return a.cfg.Protocol }
 func (a *Adapter) OwnsContract(id string) bool {
-	_, ok := a.contracts[id]
-	if ok {
+	if _, ok := a.contracts[id]; ok {
 		return true
 	}
-	_, ok = a.assets[id]
+	if _, ok := a.shareTokens[id]; ok {
+		return true
+	}
+	_, ok := a.assets[id]
 	return ok
 }
 func (a *Adapter) RegisterContracts(ids ...string) {

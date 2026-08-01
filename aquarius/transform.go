@@ -39,6 +39,10 @@ func (a *Adapter) Transform(in bindings.TransformInput) (*bindings.TransformOutp
 	for _, pos := range in.State.AMMPositions {
 		pool, ok := pools[pos.PoolContractID]
 		if !ok {
+			// A position whose pool never folded (bounded replay without the
+			// pool's instance write or seed) cannot be decomposed — but it
+			// must not vanish silently. Quarantine, don't drop.
+			out.Quarantine = append(out.Quarantine, bindings.QuarantineEvent{ID: stableID(a.ID(), pos.PoolContractID, pos.Address, in.LedgerSeq), AdapterID: a.ID(), LedgerSeq: in.LedgerSeq, ContractID: pos.PoolContractID, Reason: "aquarius_position_unknown_pool"})
 			continue
 		}
 		group := stableID(a.cfg.Protocol, pos.Address, pos.PoolContractID, pos.TickLower, pos.TickUpper)
@@ -92,12 +96,22 @@ func appendRangeComponents(out *bindings.TransformOutput, group string, p bindin
 	if len(pool.Tokens) < 2 {
 		return
 	}
+	lo, hi := p.TickLower, p.TickUpper
+	if p.LiquidityRaw == "0" && p.HadShares {
+		// Closed range position (liquidity written or removed to zero):
+		// explicit zero tombstones, mirroring the classic-LP close path.
+		// HadShares distinguishes a real close from a never-held range;
+		// absent liquidity ("") stays silent — absent is not zero.
+		for i := 0; i < 2; i++ {
+			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", "0", "0", &lo, &hi, in, true))
+		}
+		return
+	}
 	if p.Principal0Raw == "" && p.Principal1Raw == "" && p.LiquidityRaw != "" && pool.SqrtPriceX96 != "" && p.SqrtPriceLowerX96 != "" && p.SqrtPriceUpperX96 != "" {
 		if x, y, err := rangePrincipal(p.LiquidityRaw, pool.SqrtPriceX96, p.SqrtPriceLowerX96, p.SqrtPriceUpperX96); err == nil {
 			p.Principal0Raw, p.Principal1Raw = x, y
 		}
 	}
-	lo, hi := p.TickLower, p.TickUpper
 	for i, x := range []string{p.Principal0Raw, p.Principal1Raw} {
 		if x != "" && x != "0" {
 			out.AMMComponents = append(out.AMMComponents, component(group, p, pool.Protocol, pool.Tokens[i].AssetID, "range_principal", x, p.LiquidityRaw, &lo, &hi, in, false))

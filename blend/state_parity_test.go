@@ -40,9 +40,12 @@ type parityRun struct {
 	iState      *bindings.LedgerState
 	// pDiags / iDiags are the skipped-leg diagnostics of the most recent
 	// foldLedger call, kept so a test can assert their content after parity
-	// itself has been established.
-	pDiags []bindings.DecodeDiagnostic
-	iDiags []bindings.DecodeDiagnostic
+	// itself has been established. pTemporary / iTemporary are the same for
+	// the auction/queued-reserve transition set.
+	pDiags     []bindings.DecodeDiagnostic
+	iDiags     []bindings.DecodeDiagnostic
+	pTemporary []bindings.TemporaryStateChange
+	iTemporary []bindings.TemporaryStateChange
 }
 
 // newParityRun builds the two adapters. register applies identical
@@ -82,10 +85,11 @@ func (r *parityRun) strategy() *incrementalStrategy {
 // red-check tests need the non-fatal form.
 func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) {
 	r.t.Helper()
-	pNext, pDeltas, pDirty, pDiags := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
-	iNext, iDeltas, iDirty, iDiags := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
+	pNext, pDeltas, pDirty, pDiags, pTemporary := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
+	iNext, iDeltas, iDirty, iDiags, iTemporary := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
 	r.pState, r.iState = pNext, iNext
 	r.pDiags, r.iDiags = pDiags, iDiags
+	r.pTemporary, r.iTemporary = pTemporary, iTemporary
 
 	pJSON := mustMarshalState(r.t, pNext)
 	iJSON := mustMarshalState(r.t, iNext)
@@ -100,6 +104,9 @@ func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) 
 	}
 	if !reflect.DeepEqual(pDiags, iDiags) {
 		return false, fmt.Sprintf("decode-diagnostics mismatch:\nparanoid=%+v\nincremental=%+v", pDiags, iDiags)
+	}
+	if !reflect.DeepEqual(pTemporary, iTemporary) {
+		return false, fmt.Sprintf("temporary-state-changes mismatch:\nparanoid=%+v\nincremental=%+v", pTemporary, iTemporary)
 	}
 	return true, ""
 }
@@ -851,6 +858,89 @@ func TestIncrementalParity_ReserveIndexValidityDiagnostics(t *testing.T) {
 			if d.LedgerSeq != ledger.seq {
 				t.Errorf("ledger %d diagnostic stamped ledger %d", ledger.seq, d.LedgerSeq)
 			}
+		}
+	}
+}
+
+// TestIncrementalParity_TemporaryStateChanges folds auction and
+// queued-reserve create/update/remove/restore ledgers through both strategies
+// and asserts the exposed TemporaryStateChange set is identical at every
+// ledger (the harness compares it fold-by-fold) and matches the expected
+// per-ledger transitions — including a removal observed without its create
+// (the bounded-replay case).
+func TestIncrementalParity_TemporaryStateChanges(t *testing.T) {
+	t.Parallel()
+	pool1 := validContractString(t, 1)
+	user5 := accountAddressVal(t, 5)
+
+	auctionKey := auctionKeyVal(t, user5, 0)
+	resInitKey := resInitKeyVal(t, contractAddressVal(t, 2))
+
+	ledgers := []parityLedger{
+		// Auction create + queued-reserve queue.
+		{seq: 100, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, auctionKey, auctionValueVal(t, 100)),
+			stateChange(t, pool1, resInitKey, queuedReserveValueVal(t)),
+		}},
+		// Quiet carry: nothing fires.
+		{seq: 101},
+		// Auction update + queued-reserve removal.
+		{seq: 102, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, auctionKey, auctionValueVal(t, 102)),
+			stateChange(t, pool1, resInitKey, i128Val(0), withLive(false), withNoValue(), withChangeType("Removed")),
+		}},
+		// Auction removal, then restore in the next ledger.
+		{seq: 103, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, auctionKey, auctionValueVal(t, 102), withLive(false), withNoValue(), withChangeType("Removed")),
+		}},
+		{seq: 104, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, auctionKey, auctionValueVal(t, 104)),
+		}},
+		// Bounded-replay shape: a removal for an identity never created in
+		// this fold chain (different auction type) still fires.
+		{seq: 105, changes: []bindings.ContractDataChange{
+			stateChange(t, pool1, auctionKeyVal(t, user5, 1), auctionValueVal(t, 105), withLive(false), withNoValue(), withChangeType("Removed")),
+		}},
+	}
+
+	poolID := pool1
+	user := scValAddress(user5)
+	asset := scValAddress(contractAddressVal(t, 2))
+	wantTemporary := [][]bindings.TemporaryStateChange{
+		{
+			{Kind: bindings.TemporaryAuction, Action: bindings.DirtyUpsert, PoolContractID: poolID, UserAddress: user, AuctionType: 0},
+			{Kind: bindings.TemporaryQueuedReserve, Action: bindings.DirtyUpsert, PoolContractID: poolID, AssetID: asset},
+		},
+		{},
+		{
+			{Kind: bindings.TemporaryAuction, Action: bindings.DirtyUpsert, PoolContractID: poolID, UserAddress: user, AuctionType: 0},
+			{Kind: bindings.TemporaryQueuedReserve, Action: bindings.DirtyRemoval, PoolContractID: poolID, AssetID: asset},
+		},
+		{
+			{Kind: bindings.TemporaryAuction, Action: bindings.DirtyRemoval, PoolContractID: poolID, UserAddress: user, AuctionType: 0},
+		},
+		{
+			{Kind: bindings.TemporaryAuction, Action: bindings.DirtyUpsert, PoolContractID: poolID, UserAddress: user, AuctionType: 0},
+		},
+		{
+			{Kind: bindings.TemporaryAuction, Action: bindings.DirtyRemoval, PoolContractID: poolID, UserAddress: user, AuctionType: 1},
+		},
+	}
+
+	run := newParityRun(t, nil, nil)
+	for i, ledger := range ledgers {
+		if equal, detail := run.foldLedger(ledger); !equal {
+			t.Fatalf("parity broken at ledger %d: %s", ledger.seq, detail)
+		}
+		want := wantTemporary[i]
+		if len(want) == 0 {
+			if len(run.pTemporary) != 0 {
+				t.Fatalf("ledger %d temporary changes = %+v, want none", ledger.seq, run.pTemporary)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(run.pTemporary, want) {
+			t.Fatalf("ledger %d temporary changes = %+v, want %+v", ledger.seq, run.pTemporary, want)
 		}
 	}
 }

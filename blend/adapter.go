@@ -37,6 +37,14 @@ var _ bindings.DirtyPositionsProvider = (*Adapter)(nil)
 // after the fact. See bindings.DecodeDiagnosticsProvider.
 var _ bindings.DecodeDiagnosticsProvider = (*Adapter)(nil)
 
+// Adapter exposes the auction/queued-reserve transition set from its most
+// recent DecodeState/DecodeStateAt call, so a consumer persists per-ledger
+// temporary-state lifecycle rows from the changed ledger keys instead of
+// diffing complete previous/current state slices. See
+// bindings.TemporaryStateChangesProvider and
+// Adapter.ProjectTemporaryStateChanges (math.go).
+var _ bindings.TemporaryStateChangesProvider = (*Adapter)(nil)
+
 type Adapter struct {
 	cfg Config
 	// contracts is the owned contract-ID set OwnsContract checks. It is
@@ -72,6 +80,11 @@ type Adapter struct {
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDecodeDiagnostics / bindings.DecodeDiagnosticsProvider.
 	lastDiagnostics []bindings.DecodeDiagnostic
+	// lastTemporaryChanges is the auction/queued-reserve transition set from
+	// the most recent DecodeState/DecodeStateAt call, overwritten by the next
+	// one. See LastTemporaryStateChanges /
+	// bindings.TemporaryStateChangesProvider.
+	lastTemporaryChanges []bindings.TemporaryStateChange
 }
 
 // LastDirtyPositions returns the (address, pool) pairs whose position changed
@@ -87,6 +100,14 @@ func (a *Adapter) LastDirtyPositions() []bindings.DirtyPosition {
 // reserve index, amount, candidates). See bindings.DecodeDiagnosticsProvider.
 func (a *Adapter) LastDecodeDiagnostics() []bindings.DecodeDiagnostic {
 	return a.lastDiagnostics
+}
+
+// LastTemporaryStateChanges returns the auction/queued-reserve identities the
+// most recent DecodeState/DecodeStateAt call created/updated or removed,
+// sorted by (kind, pool, user, auction type, asset). See
+// bindings.TemporaryStateChangesProvider.
+func (a *Adapter) LastTemporaryStateChanges() []bindings.TemporaryStateChange {
+	return a.lastTemporaryChanges
 }
 
 func New(cfg Config) (*Adapter, error) {

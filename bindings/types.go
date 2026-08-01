@@ -375,6 +375,67 @@ type DecodeDiagnosticsProvider interface {
 	LastDecodeDiagnostics() []DecodeDiagnostic
 }
 
+// TemporaryStateKind names the temporary-storage entity families whose
+// per-ledger transitions the fold exposes (see TemporaryStateChange): pool
+// auctions (Auction(AuctionKey) entries) and queued reserves (ResInit
+// entries). Both are temporary storage on-chain: the entry only appears in
+// the ledger it changes, and any not-live change removes it.
+type TemporaryStateKind string
+
+const (
+	TemporaryAuction       TemporaryStateKind = "auction"
+	TemporaryQueuedReserve TemporaryStateKind = "queued_reserve"
+)
+
+// TemporaryStateChange is one auction or queued-reserve identity whose
+// on-chain entry the ledger just folded created/updated (DirtyUpsert) or
+// removed (DirtyRemoval). The identity comes from the changed ledger key, so
+// a removal is reportable even when the replay never observed the entry's
+// create (the bounded-replay case) — no comparison of complete previous and
+// current state slices is involved. For auctions the identity is
+// (PoolContractID, UserAddress, AuctionType); for queued reserves it is
+// (PoolContractID, AssetID). The fields of the other kind are zero.
+type TemporaryStateChange struct {
+	Kind           TemporaryStateKind
+	Action         DirtyKind
+	PoolContractID string
+	UserAddress    string // auction only
+	AuctionType    int32  // auction only
+	AssetID        string // queued reserve only
+}
+
+// TemporaryStateChangesProvider is an additive capability an adapter MAY
+// implement alongside ProtocolAdapter: after a DecodeState/DecodeStateAt
+// call, it reports exactly which auction/queued-reserve identities that
+// ledger's changes touched, sorted by (kind, pool, user, auction type,
+// asset). Same single-fold-at-a-time contract as DirtyPositionsProvider: the
+// set reflects the most recent fold, is overwritten by the next one, and must
+// be read immediately after folding, before the next ledger.
+type TemporaryStateChangesProvider interface {
+	LastTemporaryStateChanges() []TemporaryStateChange
+}
+
+// AuctionLifecycle is one per-ledger auction transition surfaced to gold:
+// Active=true carries the live auction verbatim (create, update, or restore
+// observed); Active=false carries stable identity only (the entry went
+// not-live — filled, deleted, or TTL-lapsed; the adapter cannot distinguish
+// the business outcome from a lone removed storage entry, so it does not
+// invent one). Additive beside the established full-state Auctions slice.
+type AuctionLifecycle struct {
+	Auction
+	Active bool
+}
+
+// QueuedReserveLifecycle is the queued-reserve twin of AuctionLifecycle:
+// Active=true carries the pending change verbatim; Active=false carries
+// stable identity only (executed, cancelled, or lapsed — indistinguishable
+// from a lone removed entry). Additive beside the full-state QueuedReserves
+// slice.
+type QueuedReserveLifecycle struct {
+	QueuedReserve
+	Active bool
+}
+
 // CloseTimeStateDecoder is the close-time-aware variant of DecodeState. The
 // ledger close time comes from the same close-meta the changes were extracted
 // from — it is fold INPUT, not a clock read, so purity holds: (prior, changes,
@@ -646,24 +707,32 @@ type QuarantineEvent struct {
 }
 
 type TransformOutput struct {
-	LedgerSeq          int64
-	Activities         []Activity
-	Positions          []Position
-	Summaries          []PositionSummary
-	Reserves           []Reserve
-	ReserveEmissions   []ReserveEmission
-	UserEmissions      []UserEmission
-	Auctions           []Auction
-	QueuedReserves     []QueuedReserve
-	Backstops          []Backstop
-	Contracts          []Contract
-	Quarantine         []QuarantineEvent
-	AMMPools           []AMMPool
-	AMMComponents      []AMMPositionComponent
-	AMMRewards         []AMMReward
-	Vaults             []Vault
-	PositionTombstones []PositionTombstone
-	SummaryTombstones  []SummaryTombstone
+	LedgerSeq        int64
+	Activities       []Activity
+	Positions        []Position
+	Summaries        []PositionSummary
+	Reserves         []Reserve
+	ReserveEmissions []ReserveEmission
+	UserEmissions    []UserEmission
+	Auctions         []Auction
+	QueuedReserves   []QueuedReserve
+	// AuctionLifecycle / QueuedReserveLifecycle carry the per-ledger
+	// transition rows projected from a TemporaryStateChange set (see
+	// TemporaryStateChangesProvider and the adapter's
+	// ProjectTemporaryStateChanges): active rows with payload, inactive rows
+	// with stable identity only. They are additive — the established
+	// full-state Auctions/QueuedReserves slices above keep their meaning.
+	AuctionLifecycle       []AuctionLifecycle
+	QueuedReserveLifecycle []QueuedReserveLifecycle
+	Backstops              []Backstop
+	Contracts              []Contract
+	Quarantine             []QuarantineEvent
+	AMMPools               []AMMPool
+	AMMComponents          []AMMPositionComponent
+	AMMRewards             []AMMReward
+	Vaults                 []Vault
+	PositionTombstones     []PositionTombstone
+	SummaryTombstones      []SummaryTombstone
 }
 
 // Vault is one vault snapshot row for gold: the (address, denomination) pair

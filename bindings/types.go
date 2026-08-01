@@ -5,10 +5,13 @@
 // config-persistence inversion-of-control types (config.go).
 //
 // One deliberate transitional coupling: LedgerState is the seam's state
-// carrier (it is named in the ProtocolAdapter signatures), but its slices are
-// still Blend-shaped, so this package imports blend/contracts for the member
-// types and enums. Genericizing LedgerState is deferred until a second real
-// protocol needs its own state shape.
+// carrier (it is named in the ProtocolAdapter signatures), but its original
+// slices are Blend-shaped, so this package imports blend/contracts for those
+// member types and enums. Genericization happens additively, one slice family
+// at a time, as real protocols demand it: the AMM* slices came with the first
+// AMM protocol, the Vault* slices with the first CDP-style vault protocol
+// (FXDAO). Each family sits beside the older slices so existing checkpoint
+// JSON remains decodable.
 package bindings
 
 import (
@@ -96,6 +99,56 @@ type LedgerState struct {
 	AMMPools     []AMMPoolState
 	AMMPositions []AMMPositionState
 	AMMAssets    []AMMAssetMetadata
+	// Vaults and VaultsInfo are the protocol-neutral state carrier for
+	// CDP-style vault protocols (collateral/debt positions keyed by
+	// (account, denomination) on one vaults contract; FXDAO is the first).
+	// Like the AMM slices, they intentionally sit beside the legacy Blend
+	// slices so existing checkpoints remain JSON-compatible.
+	Vaults     []VaultState
+	VaultsInfo []VaultsInfoState
+}
+
+// VaultState is one on-chain vault: a single (account, denomination) pair on
+// one vaults contract. All quantity fields are raw decimal strings (u128-
+// safe); an absent field is "" — never a fabricated zero.
+type VaultState struct {
+	Protocol     string
+	ContractID   string
+	Account      string
+	Denomination string
+	// IndexRaw is the vault's on-chain sort index (collateralization order).
+	IndexRaw      string
+	CollateralRaw string
+	DebtRaw       string
+	// HadVault is sticky lifecycle state, the vault analog of
+	// AMMPositionState.HadShares: true once the fold has observed the vault
+	// live. It distinguishes "vault that closed" (Closed && HadVault, which
+	// deserves a terminal closed row) from "vault never seen live".
+	HadVault bool
+	// Closed marks a genuine on-chain deletion of the vault entry this ledger
+	// or earlier. A TTL lapse / archival is NOT a close: archived entries
+	// restore with their bytes intact and restore-then-write is the normal
+	// wake-up sequence for long-idle vaults.
+	Closed bool
+	// Restored is true when the vault's most recent write was a
+	// LedgerEntryRestored change — the raw change variant is preserved so
+	// downstream consumers can tell a restore-write from a plain update.
+	// A restored entry is LIVE.
+	Restored bool
+}
+
+// VaultsInfoState is one denomination's aggregate vault bookkeeping from the
+// vaults contract instance (per-denomination totals and rate parameters).
+type VaultsInfoState struct {
+	Protocol           string
+	ContractID         string
+	Denomination       string
+	TotalVaultsRaw     string
+	TotalDebtRaw       string
+	TotalColRaw        string
+	MinColRateRaw      string
+	MinDebtCreationRaw string
+	OpeningColRateRaw  string
 }
 
 type AMMAssetMetadata struct {
@@ -608,8 +661,39 @@ type TransformOutput struct {
 	AMMPools           []AMMPool
 	AMMComponents      []AMMPositionComponent
 	AMMRewards         []AMMReward
+	Vaults             []Vault
 	PositionTombstones []PositionTombstone
 	SummaryTombstones  []SummaryTombstone
+}
+
+// Vault is one vault snapshot row for gold: the (address, denomination) pair
+// on one vaults contract, with the raw on-chain amounts. Status is 'active'
+// (entry live or archived-but-owned on-chain) or 'closed' (the entry was
+// genuinely deleted this ledger or earlier) — the closed row IS the vault's
+// tombstone: current-state views project the latest row per identity, so a
+// terminal 'closed' snapshot retires the vault without a second write path.
+// Quantity fields are "" when absent on-chain (a deleted vault's terminal row
+// carries no amounts); USD valuations stay "" unless a confirmed price source
+// exists — honest-null, never fabricated.
+type Vault struct {
+	ID            string
+	Address       string
+	Protocol      string
+	ContractID    string
+	Denomination  string
+	VaultIndexRaw string
+	CollateralRaw string
+	DebtRaw       string
+	// RatioRaw is the contract's own deposit-ratio math
+	// (currency_rate * collateral / debt, raw scale); "" when the oracle rate
+	// needed to compute it is unavailable.
+	RatioRaw      string
+	CollateralUSD string
+	DebtUSD       string
+	Status        string // "active" | "closed"
+	LedgerSeq     int64
+	Timestamp     time.Time
+	Metadata      map[string]string
 }
 
 type AMMPool struct {

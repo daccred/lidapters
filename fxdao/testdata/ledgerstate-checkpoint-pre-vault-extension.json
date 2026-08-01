@@ -1,0 +1,117 @@
+{
+  "Pools": [
+    {
+      "ContractID": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "BackstopContract": "",
+      "OracleContract": "",
+      "WasmHash": "",
+      "PoolStatus": "",
+      "BackstopTakeRate": "",
+      "Name": "Fixed",
+      "Admin": "",
+      "BLNDToken": "",
+      "MaxPositionsRaw": "",
+      "MinCollateralRaw": "",
+      "PoolEmissions": null,
+      "Reserves": null,
+      "BackstopSharesRaw": "",
+      "BackstopTokensRaw": "",
+      "BackstopQ4WSharesRaw": "",
+      "BackstopEmisEPSRaw": "",
+      "BackstopEmisExpirationRaw": "",
+      "BackstopEmisIndexRaw": "",
+      "BackstopEmisLastTimeRaw": ""
+    }
+  ],
+  "Users": [
+    {
+      "Address": "GDMZDE4UCYGMXZS5FBKZ4DHYCCSCFM4DH3ZVCTLVXMUOEIN2CCCMYYPG",
+      "PoolContractID": "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD",
+      "AssetID": "",
+      "PositionType": "",
+      "BTokensRaw": "",
+      "DTokensRaw": "",
+      "Archived": false,
+      "ArchivedLedgerSeq": 0
+    }
+  ],
+  "Backstops": null,
+  "PendingUserPositions": null,
+  "Oracles": null,
+  "PriceFeeds": null,
+  "OracleAggregators": null,
+  "Assets": null,
+  "Auctions": null,
+  "UserEmissions": null,
+  "QueuedReserves": null,
+  "BackstopInstances": null,
+  "AMMPools": [
+    {
+      "Protocol": "aquarius",
+      "RouterContract": "",
+      "PoolHash": "",
+      "ContractID": "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK",
+      "WasmHash": "",
+      "PoolType": "volatile",
+      "Tokens": [
+        {
+          "AssetID": "a",
+          "Decimals": 0,
+          "ReserveRaw": "100"
+        },
+        {
+          "AssetID": "b",
+          "Decimals": 0,
+          "ReserveRaw": "200"
+        }
+      ],
+      "TotalSharesRaw": "300",
+      "FeeFractionRaw": "",
+      "ProtocolFeeFractionRaw": "",
+      "AmplificationRaw": "",
+      "TickSpacing": 0,
+      "SqrtPriceX96": "",
+      "CurrentTick": 0,
+      "ActiveLiquidityRaw": "",
+      "FeeGrowthGlobal0X128": "",
+      "FeeGrowthGlobal1X128": "",
+      "RewardTpsRaw": "",
+      "RewardExpiredAtRaw": "",
+      "RewardAccumulatedRaw": "",
+      "RewardLastTimeRaw": "",
+      "WorkingSupplyRaw": "",
+      "RewardTokenID": ""
+    }
+  ],
+  "AMMPositions": [
+    {
+      "Address": "GB77C7CHJQGWNMDPWRXXN5KMS55K5SSERBGND4GGCYDDBLC52FEKHUOR",
+      "PoolContractID": "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK",
+      "SharesRaw": "7",
+      "TickLower": 0,
+      "TickUpper": 0,
+      "LiquidityRaw": "",
+      "SqrtPriceLowerX96": "",
+      "SqrtPriceUpperX96": "",
+      "Principal0Raw": "",
+      "Principal1Raw": "",
+      "PendingFee0Raw": "",
+      "PendingFee1Raw": "",
+      "RewardTokenID": "",
+      "PendingRewardRaw": "",
+      "WeightedLiquidityRaw": "",
+      "RewardCheckpointEligible": false,
+      "HadShares": true,
+      "WorkingBalanceRaw": "",
+      "RewardPoolAccumulatedRaw": ""
+    }
+  ],
+  "AMMAssets": [
+    {
+      "ContractID": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
+      "Symbol": "XLM",
+      "Name": "",
+      "Decimals": 7
+    }
+  ]
+}

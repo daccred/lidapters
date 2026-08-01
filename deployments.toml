@@ -1,4 +1,4 @@
-# deployments.toml — canonical Blend deploy-ledger pins.
+# deployments.toml — canonical deploy-ledger pins (Blend, Aquarius, Soroswap, FxDAO).
 #
 # A contract's "deploy ledger" is the ledger its instance was created in. It is
 # IMMUTABLE. The relay pins it to floor the in-process fold low enough to capture
@@ -14,7 +14,8 @@
 # Schema (one [[pin]] table per contract):
 #   network        "testnet" | "public"
 #   contract_id    Stellar contract id (C...)
-#   role           "pool" | "oracle" | "backstop" | "price_feed"
+#   role           "pool" | "oracle" | "backstop" | "price_feed" |
+#                  "soroswap_factory" | "soroswap_router" | "fxdao_vaults"
 #   deploy_ledger  int; OMIT if uncurated
 #   source         where the value came from
 #   notes          free text
@@ -110,3 +111,47 @@ contract_id = "CALI2BYU2JE6WVRUFYTS6MSBNEHGJ35P4AVCZYF3B6QOE3QKOB2PLE6M"
 role = "price_feed"
 source = "yieldblox/oracle-aggregator live instance storage read 2026-07-10 (stellar.expert validated build)"
 notes = "Reflector 'Stellar Mainnet DEX' feed (created 2024-03-04), base USDC token CCW67TSZ..., 14 decimals, 300s resolution. Backs the YieldBloxV2 aggregator CD74A3C5... (address-keyed assets)."
+
+# --- public / mainnet Soroswap (verified — exact create_contract ledgers) ----
+# Contract ids and wasm identity come from the protocol's own published
+# manifest (soroswap/core public/mainnet.contracts.json @ bb90a65); the
+# factory and router wasm hashes in that manifest match the on-chain instance
+# executables (stellar.expert contract records + Hubble contract_data_current,
+# checked 2026-08-01). Deploy ledgers pinned by exact stellar.expert
+# close-time match (delta 0). The factory is the pair-discovery authority:
+# pairs deploy permissionlessly and register as PairAddressesNIndexed(u32)
+# persistent writes (209 at head), so a full-history fold floors here.
+
+[[pin]]
+network = "public"
+contract_id = "CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2"
+role = "soroswap_factory"
+deploy_ledger = 50746266
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "Soroswap factory, create 2024-03-11 16:23:09 UTC. Wasm 5db738b05d9148128a240b0e2c1cb935c2805192bf98a579421aacda364c8dae matches the manifest and the on-chain instance executable. THE PROTOCOL FLOOR: pair discovery (new_pair events + PairAddressesNIndexed writes) starts here."
+
+[[pin]]
+network = "public"
+contract_id = "CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH"
+role = "soroswap_router"
+deploy_ledger = 50746272
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "Soroswap router, create 2024-03-11 16:23:45 UTC. Wasm 4c3db3ebd2d6a2ab23de1f622eaabb39501539b4611b68622ec4e47f76c4ba07 matches manifest and chain. Emits convenience-op events only (init/add/remove/swap); pair events are the activity feed."
+
+# --- public / mainnet FxDAO (verified — exact create_contract ledger) --------
+# Contract id copied character-exactly from the protocol's own docs page
+# (fxdao.io/docs/addresses), cross-checked against stellar.expert and Hubble
+# contract_data (2026-08-01). SNAPSHOT-ONLY surface: the vaults contract
+# emits zero contract events by design (no publish call in its source at
+# FxDAO-SC @ b73d8b6), so the fold is contract_data-delta driven only. The
+# protocol's history is FINISHED: the last state-mutating write is ledger
+# 62,645,363 = 2026-05-19T22:14:05Z; a full-history fold is deploy floor ->
+# past that ledger, no tip-chasing.
+
+[[pin]]
+network = "public"
+contract_id = "CCUN4RXU5VNDHSF4S4RKV4ZJYMX2YWKOH6L4AKEKVNVDQ7HY5QIAO4UB"
+role = "fxdao_vaults"
+deploy_ledger = 51835681
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "FxDAO vaults, create 2024-05-26 04:14:28 UTC. Storage entries at head: 1 (every vault entry deleted - finished history). THE PROTOCOL FLOOR: a full-history fold starts here."

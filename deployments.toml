@@ -137,3 +137,21 @@ role = "soroswap_router"
 deploy_ledger = 50746272
 source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
 notes = "Soroswap router, create 2024-03-11 16:23:45 UTC. Wasm 4c3db3ebd2d6a2ab23de1f622eaabb39501539b4611b68622ec4e47f76c4ba07 matches manifest and chain. Emits convenience-op events only (init/add/remove/swap); pair events are the activity feed."
+
+# --- public / mainnet FxDAO (verified — exact create_contract ledger) --------
+# Contract id copied character-exactly from the protocol's own docs page
+# (fxdao.io/docs/addresses), cross-checked against stellar.expert and Hubble
+# contract_data (2026-08-01). SNAPSHOT-ONLY surface: the vaults contract
+# emits zero contract events by design (no publish call in its source at
+# FxDAO-SC @ b73d8b6), so the fold is contract_data-delta driven only. The
+# protocol's history is FINISHED: the last state-mutating write is ledger
+# 62,645,363 = 2026-05-19T22:14:05Z; a full-history fold is deploy floor ->
+# past that ledger, no tip-chasing.
+
+[[pin]]
+network = "public"
+contract_id = "CCUN4RXU5VNDHSF4S4RKV4ZJYMX2YWKOH6L4AKEKVNVDQ7HY5QIAO4UB"
+role = "fxdao_vaults"
+deploy_ledger = 51835681
+source = "stellar.expert exact close-time match (HIGH); create_contract ledger"
+notes = "FxDAO vaults, create 2024-05-26 04:14:28 UTC. Storage entries at head: 1 (every vault entry deleted - finished history). THE PROTOCOL FLOOR: a full-history fold starts here."

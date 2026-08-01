@@ -497,13 +497,23 @@ func reserveByAsset(pool contracts.PoolState, assetID string) (contracts.Reserve
 	return contracts.ReserveState{}, false
 }
 
+// reserveByIndex resolves a reserve by its index under the same known-unique
+// rule the fold's reserveByIndex applies: only a reserve whose index came from
+// a decoded ResConfig participates, and only when it is the single claimant —
+// an unknown or duplicate index is unresolved, never a guessed winner.
 func reserveByIndex(pool contracts.PoolState, index int32) (contracts.ReserveState, bool) {
+	var found contracts.ReserveState
+	claimants := 0
 	for _, r := range pool.Reserves {
-		if r.ReserveIndex == index {
-			return r, true
+		if r.ReserveIndexKnown && r.ReserveIndex == index {
+			found = r
+			claimants++
 		}
 	}
-	return contracts.ReserveState{}, false
+	if claimants != 1 {
+		return contracts.ReserveState{}, false
+	}
+	return found, true
 }
 
 func oraclePriceByIndex(oracle contracts.OracleState, index int64) (string, bool) {
@@ -718,20 +728,27 @@ func (a *Adapter) HydrateConfig(records []bindings.ConfigRecord) (*bindings.Ledg
 				return nil, err
 			}
 			reservesByPool[body.PoolID] = append(reservesByPool[body.PoolID], contracts.ReserveState{
-				ReserveIndex:  body.Index,
-				AssetID:       body.AssetID,
-				AssetDecimals: body.Decimals,
-				CFactorRaw:    body.CFactor,
-				LFactorRaw:    body.LFactor,
-				UtilTargetRaw: body.UtilTarget,
-				MaxUtilRaw:    body.MaxUtil,
-				RBaseRaw:      body.RBase,
-				ROneRaw:       body.ROne,
-				RTwoRaw:       body.RTwo,
-				RThreeRaw:     body.RThree,
-				SupplyCapRaw:  body.SupplyCap,
-				ReactivityRaw: body.Reactivity,
-				Enabled:       body.Enabled,
+				ReserveIndex: body.Index,
+				// A blend.reserve record exists only because a ResConfig — index
+				// included — was decoded, so hydration implies a known index.
+				// This holds for records written before ReserveIndexKnown
+				// existed: their payload has no boolean for it, and interpreting
+				// the missing field as unknown would invalidate every
+				// pre-existing config row.
+				ReserveIndexKnown: true,
+				AssetID:           body.AssetID,
+				AssetDecimals:     body.Decimals,
+				CFactorRaw:        body.CFactor,
+				LFactorRaw:        body.LFactor,
+				UtilTargetRaw:     body.UtilTarget,
+				MaxUtilRaw:        body.MaxUtil,
+				RBaseRaw:          body.RBase,
+				ROneRaw:           body.ROne,
+				RTwoRaw:           body.RTwo,
+				RThreeRaw:         body.RThree,
+				SupplyCapRaw:      body.SupplyCap,
+				ReactivityRaw:     body.Reactivity,
+				Enabled:           body.Enabled,
 
 				SupplyEmisEPSRaw:        body.SupplyEmisEPS,
 				SupplyEmisExpirationRaw: body.SupplyEmisExpiration,

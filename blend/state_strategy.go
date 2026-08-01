@@ -33,11 +33,12 @@ import (
 )
 
 // stateStrategy folds one ledger's owned contract_data changes into the next
-// typed LedgerState (plus the in-package silver-debug deltas and the exposed
-// dirty-positions set — see bindings.DirtyPosition). Implementations own the
-// entire chain; DecodeState/DecodeStateAt delegate here blindly.
+// typed LedgerState (plus the in-package silver-debug deltas, the exposed
+// dirty-positions set — see bindings.DirtyPosition — and the fold's
+// skipped-leg diagnostics — see bindings.DecodeDiagnostic). Implementations
+// own the entire chain; DecodeState/DecodeStateAt delegate here blindly.
 type stateStrategy interface {
-	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition)
+	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic)
 }
 
 // dirtyUserPositions is an optional capability a stateStrategy MAY implement:
@@ -61,7 +62,7 @@ type paranoidStrategy struct {
 	adapter *Adapter
 }
 
-func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
-	next, deltas, dirty := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, deltas, dirty
+func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
+	next, deltas, dirty, diagnostics := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
+	return &next, deltas, dirty, diagnostics
 }

@@ -46,8 +46,9 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 // incremental produces byte-identical output from a carried mirror. See
 // state_strategy.go for the two-mode contract.
 func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
-	next, _, dirty := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
+	next, _, dirty, diagnostics := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
 	a.lastDirty = dirty
+	a.lastDiagnostics = diagnostics
 	return next, nil
 }
 
@@ -172,6 +173,15 @@ type blendStateBuilder struct {
 	// mistaken for a pool or a mock oracle.
 	ownedFeeds map[string]struct{}
 	deltas     []typedStateDelta
+	// ledgerSeq is the ledger currently being folded, threaded onto the builder
+	// so the position-skip diagnostics emitted during build carry it. Set once
+	// per decode, before apply runs.
+	ledgerSeq int64
+	// diagnostics collects this fold's skipped-leg records (see
+	// positionSkipSink). Paranoid starts from a fresh builder each ledger; the
+	// incremental strategy resets it in normalizeCarry beside deltas. Both
+	// strategies sort it with sortDecodeDiagnostics before returning it.
+	diagnostics []bindings.DecodeDiagnostic
 	// dirtyUsers collects the identity of every user-positions entry apply
 	// touches (live write, archive, or explicit delete), keyed like pendingPos.
 	// Always allocated (both strategies populate it identically): the
@@ -222,6 +232,18 @@ type poolBuilder struct {
 	reserves       map[string]*reserveBuilder
 	reserveList    []string
 	reserveByIndex map[int32]string
+	// ambiguousByIndex holds each reserve index claimed by two or more
+	// KNOWN-index reserves, mapped to the sorted claiming asset IDs. Such an
+	// index is deliberately absent from reserveByIndex: resolving either way
+	// would misattribute. positionsFromMap reports skipped legs against it as
+	// duplicate_reserve_index diagnostics.
+	ambiguousByIndex map[int32][]string
+	// unknownIndexAssets is the sorted asset IDs of the pool's reserves whose
+	// index is not known (ResData materialized the reserve; its ResConfig never
+	// folded). They are the candidates reported on an unmapped_reserve_index
+	// diagnostic: the skipped leg's true owner is one of them, but which one is
+	// unknowable until its ResConfig arrives.
+	unknownIndexAssets []string
 }
 
 type reserveBuilder struct {
@@ -297,13 +319,15 @@ func newBlendStateBuilder() *blendStateBuilder {
 // decodeBlendState is the pure-reducer core shared by DecodeState (which returns
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
-// built state, the silver-debug deltas, and the ledger's dirty-positions set
-// (see markPoolRemapDirty and bindings.DirtyPosition).
-func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition) {
+// built state, the silver-debug deltas, the ledger's dirty-positions set (see
+// markPoolRemapDirty and bindings.DirtyPosition), and the ledger's skipped-leg
+// diagnostics (see positionSkipSink and bindings.DecodeDiagnostic).
+func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	b.ownedAssets = a.assets
 	b.ownedFeeds = a.feeds
+	b.ledgerSeq = ledgerSeq
 	if prior != nil {
 		b.loadPrior(prior)
 	}
@@ -323,29 +347,28 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	// (appendPoolReserves / appendPoolUsers / appendBackstopUsersForPool), and Go
 	// map order is randomized, so two runs over the same ledgers would otherwise
 	// emit them in different orders. Sort by a stable total-order key before emit
-	// so the output is byte-identical run to run.
+	// so the output is byte-identical run to run. The skipped-leg diagnostics
+	// collected during build are sorted for the same reason.
+	next := b.build(closeTime)
 	sortTypedStateDeltas(b.deltas)
+	sortDecodeDiagnostics(b.diagnostics)
 
-	return b.build(closeTime), b.deltas, dirty
+	return next, b.deltas, dirty, b.diagnostics
 }
 
-// reserveIndexSnapshot derives each pool's reserveByIndex mapping (ReserveIndex
-// -> AssetID) as of a LedgerState, the same shape loadPrior would reconstruct.
-// nil (no prior) yields an empty snapshot: every pool the fold produces this
-// ledger is then "new", which is correct — a first-ledger pending entry can
-// only exist if it was also created this ledger, and that is already in
-// dirtyUsers directly.
+// reserveIndexSnapshot derives each pool's reserveByIndex mapping (known,
+// unique ReserveIndex -> AssetID) as of a LedgerState, the same shape
+// loadPrior would reconstruct. nil (no prior) yields an empty snapshot: every
+// pool the fold produces this ledger is then "new", which is correct — a
+// first-ledger pending entry can only exist if it was also created this
+// ledger, and that is already in dirtyUsers directly.
 func reserveIndexSnapshot(state *bindings.LedgerState) map[string]map[int32]string {
 	if state == nil {
 		return nil
 	}
 	out := make(map[string]map[int32]string, len(state.Pools))
 	for _, pool := range state.Pools {
-		idx := make(map[int32]string, len(pool.Reserves))
-		for _, r := range pool.Reserves {
-			idx[r.ReserveIndex] = r.AssetID
-		}
-		out[pool.ContractID] = idx
+		out[pool.ContractID] = publishedReserveIndexes(pool.Reserves)
 	}
 	return out
 }
@@ -580,7 +603,7 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 		mergeBackstopEmis(pool, b.backstopEmis)
 		pools = append(pools, pool.state)
 	}
-	for _, p := range b.pendingPos {
+	for composite, p := range b.pendingPos {
 		// Raw blob round-trips regardless of whether the pool is known yet, so a
 		// position decoded before its pool appears is not lost.
 		pending = append(pending, pendingOut(p))
@@ -589,7 +612,16 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 			continue
 		}
 		finalizePoolReserves(pool)
-		users = append(users, buildUserPositionsForPending(pool, p)...)
+		// Skipped-leg diagnostics are recorded only for the (address, pool)
+		// pairs this ledger's fold actually touched (the dirty set, including
+		// the pool-remap union). That keeps the records scoped to the fold —
+		// and identical across the two strategies, whose per-ledger position
+		// recomputation covers exactly the dirty pairs.
+		var sink *positionSkipSink
+		if _, touched := b.dirtyUsers[composite]; touched {
+			sink = &positionSkipSink{ledgerSeq: b.ledgerSeq, out: &b.diagnostics}
+		}
+		users = append(users, buildUserPositionsForPending(pool, p, sink)...)
 	}
 	for _, userBalance := range b.backstopUsers {
 		backstops = append(backstops, b.backstopPosition(userBalance))
@@ -1446,16 +1478,18 @@ func (b *blendStateBuilder) appendUserPositions(pending pendingUserPositions, le
 		return
 	}
 	finalizePoolReserves(pool)
-	positions := buildUserPositionsForPending(pool, pending)
+	// Silver-debug deltas recompute positions for their own payload only — no
+	// diagnostics sink; the fold's skipped-leg records come from build().
+	positions := buildUserPositionsForPending(pool, pending, nil)
 	b.addDelta(ledgerSeq, "user_positions", typedUserEntityKey(pending.user, pending.poolContract), true, positions)
 }
 
-func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPositions) []contracts.UserReservePosition {
+func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPositions, sink *positionSkipSink) []contracts.UserReservePosition {
 	fields := scMapFields(pending.positions)
 	out := make([]contracts.UserReservePosition, 0)
-	out = append(out, positionsFromMap(pool, pending, fields["supply"], contracts.PositionTypeSupply)...)
-	out = append(out, positionsFromMap(pool, pending, fields["collateral"], contracts.PositionTypeCollateral)...)
-	out = append(out, positionsFromMap(pool, pending, fields["liabilities"], contracts.PositionTypeLiability)...)
+	out = append(out, positionsFromMap(pool, pending, fields["supply"], contracts.PositionTypeSupply, sink)...)
+	out = append(out, positionsFromMap(pool, pending, fields["collateral"], contracts.PositionTypeCollateral, sink)...)
+	out = append(out, positionsFromMap(pool, pending, fields["liabilities"], contracts.PositionTypeLiability, sink)...)
 	return out
 }
 
@@ -1695,6 +1729,11 @@ func applyReserveConfig(reserve *reserveBuilder, value xdr.ScVal) {
 	fields := scMapFields(value)
 	if index, ok := fieldInt32(fields, "index"); ok {
 		reserve.state.ReserveIndex = index
+		// The decoded ResConfig.index is the ONLY authority on index validity:
+		// it — and nothing else — marks the reserve's index as known. A reserve
+		// materialized by ResData alone keeps the zero-value default with
+		// ReserveIndexKnown=false and never enters index-based resolution.
+		reserve.state.ReserveIndexKnown = true
 	}
 	if decimals, ok := fieldInt32(fields, "decimals"); ok {
 		reserve.state.AssetDecimals = decimals
@@ -2121,22 +2160,95 @@ func finalizePoolReserves(pool *poolBuilder) {
 	pool.state.Reserves = reserves
 
 	// reserveByIndex is derived from the just-sorted slice, not a second raw
-	// range over pool.reserves: two reserves can share a ReserveIndex (e.g. one
-	// configured, one still at its zero-value default before ResConfig folds),
-	// and building the map straight from Go's randomized map iteration made the
-	// collision's winner nondeterministic run to run — harmless for output that
-	// never queries the colliding index, but it broke byte-for-byte
-	// reproducibility of reserveByIndex itself (surfaced by
-	// markPoolRemapDirty's prior-vs-current comparison flaking in the parity
-	// suite). Iterating the sorted slice instead makes the same asset win the
-	// collision every time: the highest AssetID for that index.
-	pool.reserveByIndex = map[int32]string{}
+	// range over pool.reserves, so the published mapping is reproducible run to
+	// run (surfaced by markPoolRemapDirty's prior-vs-current comparison flaking
+	// in the parity suite when it was built from Go's randomized map iteration).
+	//
+	// Only KNOWN, UNIQUE indexes are published. An unknown index (a reserve
+	// materialized by ResData alone, still at its zero-value default) must never
+	// masquerade as the real index 0 — that collision misattributed every
+	// position leg resolved through it (lidapters#33). A duplicate known index
+	// is equally unsafe: choosing a deterministic winner still misattributes, so
+	// the index is left unresolved and its claiming assets are recorded as
+	// ambiguity candidates instead.
+	knownCount := map[int32]int{}
 	for _, reserve := range reserves {
-		pool.reserveByIndex[reserve.ReserveIndex] = reserve.AssetID
+		if reserve.ReserveIndexKnown {
+			knownCount[reserve.ReserveIndex]++
+		}
 	}
+	pool.reserveByIndex = map[int32]string{}
+	pool.ambiguousByIndex = map[int32][]string{}
+	pool.unknownIndexAssets = nil
+	for _, reserve := range reserves {
+		if !reserve.ReserveIndexKnown {
+			pool.unknownIndexAssets = append(pool.unknownIndexAssets, reserve.AssetID)
+			continue
+		}
+		if knownCount[reserve.ReserveIndex] == 1 {
+			pool.reserveByIndex[reserve.ReserveIndex] = reserve.AssetID
+		} else {
+			pool.ambiguousByIndex[reserve.ReserveIndex] = append(pool.ambiguousByIndex[reserve.ReserveIndex], reserve.AssetID)
+		}
+	}
+	sort.Strings(pool.unknownIndexAssets)
 }
 
-func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr.ScVal, kind contracts.PositionType) []contracts.UserReservePosition {
+// publishedReserveIndexes derives a pool's reserveByIndex mapping (known,
+// unique ReserveIndex -> AssetID) from its typed reserve slice — the same rule
+// finalizePoolReserves applies to the builder mirror, so a prior LedgerState
+// and a rebuilt builder compare equal when their effective mappings match.
+func publishedReserveIndexes(reserves []contracts.ReserveState) map[int32]string {
+	knownCount := map[int32]int{}
+	for _, reserve := range reserves {
+		if reserve.ReserveIndexKnown {
+			knownCount[reserve.ReserveIndex]++
+		}
+	}
+	out := make(map[int32]string, len(knownCount))
+	for _, reserve := range reserves {
+		if reserve.ReserveIndexKnown && knownCount[reserve.ReserveIndex] == 1 {
+			out[reserve.ReserveIndex] = reserve.AssetID
+		}
+	}
+	return out
+}
+
+// positionSkipSink collects one bindings.DecodeDiagnostic per non-zero
+// position leg positionsFromMap skips as unresolvable. It is nil on every path
+// that recomputes positions for a purpose other than this ledger's folded
+// output (silver-debug deltas, the incremental strategy's carried-cache
+// rebuilds), so diagnostics are recorded exactly once per skipped leg per fold
+// and only for the (address, pool) pairs the ledger actually touched.
+type positionSkipSink struct {
+	ledgerSeq int64
+	out       *[]bindings.DecodeDiagnostic
+}
+
+// skip records the skipped leg. A duplicate known index reports the claiming
+// assets; anything else is an unmapped index and reports the pool's
+// unknown-index reserves as the candidates (the leg's true owner is one of
+// them, but which is unknowable until its ResConfig folds).
+func (s *positionSkipSink) skip(pool *poolBuilder, pending pendingUserPositions, kind contracts.PositionType, index int32, amount string) {
+	diag := bindings.DecodeDiagnostic{
+		LedgerSeq:      s.ledgerSeq,
+		PoolContractID: pending.poolContract,
+		Address:        pending.user,
+		PositionType:   string(kind),
+		ReserveIndex:   index,
+		AmountRaw:      amount,
+	}
+	if candidates, duplicate := pool.ambiguousByIndex[index]; duplicate {
+		diag.Code = bindings.DecodeDiagnosticDuplicateReserveIndex
+		diag.CandidateAssetIDs = append([]string(nil), candidates...)
+	} else {
+		diag.Code = bindings.DecodeDiagnosticUnmappedReserveIndex
+		diag.CandidateAssetIDs = append([]string(nil), pool.unknownIndexAssets...)
+	}
+	*s.out = append(*s.out, diag)
+}
+
+func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr.ScVal, kind contracts.PositionType, sink *positionSkipSink) []contracts.UserReservePosition {
 	raw, ok := value.GetMap()
 	if !ok || raw == nil {
 		return nil
@@ -2147,12 +2259,19 @@ func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr
 		if !ok {
 			continue
 		}
-		assetID := pool.reserveByIndex[index]
-		if assetID == "" {
-			continue
-		}
 		amount, ok := scIntString(entry.Val)
 		if !ok || amount == "0" {
+			continue
+		}
+		// Resolve only through the published known-unique mapping. An
+		// unresolvable non-zero leg is skipped — never guessed through the
+		// zero-value default or a duplicate — and surfaced as a diagnostic so a
+		// bounded replay that cannot attribute it is visibly incomplete.
+		assetID, resolved := pool.reserveByIndex[index]
+		if !resolved {
+			if sink != nil {
+				sink.skip(pool, pending, kind, index, amount)
+			}
 			continue
 		}
 		pos := contracts.UserReservePosition{
@@ -2171,6 +2290,34 @@ func positionsFromMap(pool *poolBuilder, pending pendingUserPositions, value xdr
 		out = append(out, pos)
 	}
 	return out
+}
+
+// sortDecodeDiagnostics orders a fold's diagnostics by their stable
+// total-order key so the exposed set is byte-identical run to run regardless
+// of the map-iteration order the legs were collected in.
+func sortDecodeDiagnostics(diags []bindings.DecodeDiagnostic) {
+	sort.SliceStable(diags, func(i, j int) bool {
+		di, dj := diags[i], diags[j]
+		if di.Code != dj.Code {
+			return di.Code < dj.Code
+		}
+		if di.PoolContractID != dj.PoolContractID {
+			return di.PoolContractID < dj.PoolContractID
+		}
+		if di.Address != dj.Address {
+			return di.Address < dj.Address
+		}
+		if di.PositionType != dj.PositionType {
+			return di.PositionType < dj.PositionType
+		}
+		if di.ReserveIndex != dj.ReserveIndex {
+			return di.ReserveIndex < dj.ReserveIndex
+		}
+		if di.AmountRaw != dj.AmountRaw {
+			return di.AmountRaw < dj.AmountRaw
+		}
+		return strings.Join(di.CandidateAssetIDs, "|") < strings.Join(dj.CandidateAssetIDs, "|")
+	})
 }
 
 func decodeBackstopPoolBalance(poolID string, value xdr.ScVal) backstopPoolBalance {

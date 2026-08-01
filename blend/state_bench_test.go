@@ -97,7 +97,7 @@ func benchPrior(b *testing.B, poolID string, nUsers int) *bindings.LedgerState {
 		Pools: []contracts.PoolState{{
 			ContractID: poolID,
 			PoolStatus: "active",
-			Reserves:   []contracts.ReserveState{{ReserveIndex: 1, AssetID: assetID, AssetDecimals: 7}},
+			Reserves:   []contracts.ReserveState{{ReserveIndex: 1, ReserveIndexKnown: true, AssetID: assetID, AssetDecimals: 7}},
 		}},
 	}
 	blob := benchPositionsChange(b, poolID, benchAddress(b, 0), 1000)

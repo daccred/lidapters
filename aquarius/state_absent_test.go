@@ -121,6 +121,57 @@ func TestConcentratedPositionWithoutTickBoundsRefusesLoudly(t *testing.T) {
 	}
 }
 
+func instanceWrite(t *testing.T, contractID string, storage xdr.ScMap) bindings.ContractDataChange {
+	t.Helper()
+	exec, err := xdr.NewContractExecutable(xdr.ContractExecutableTypeContractExecutableStellarAsset, nil)
+	if err != nil {
+		t.Fatalf("executable: %v", err)
+	}
+	val, err := xdr.NewScVal(xdr.ScValTypeScvContractInstance, xdr.ScContractInstance{Executable: exec, Storage: &storage})
+	if err != nil {
+		t.Fatalf("instance scval: %v", err)
+	}
+	key := xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance}
+	return entryWrite(t, contractID, key, val)
+}
+
+// TestMidRampAmplificationIsAbsent pins the settled-ramp rule for stable
+// amplification: the pool has ONE amplification only while InitialA equals
+// FutureA. Mid-ramp there is no single value, so the field must empty —
+// carrying either endpoint (or a stale settled value) would state an
+// amplification the chain never settled on.
+func TestMidRampAmplificationIsAbsent(t *testing.T) {
+	a, err := NewWithConfig(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.RegisterContracts("pool")
+	settled := xdr.ScMap{
+		{Key: vecVal(t, symVal(t, "pool_type")), Val: symVal(t, "stable")},
+		{Key: vecVal(t, symVal(t, "InitialA")), Val: u128ScVal(t, 1500)},
+		{Key: vecVal(t, symVal(t, "FutureA")), Val: u128ScVal(t, 1500)},
+	}
+	state, err := a.DecodeState(nil, []bindings.ContractDataChange{instanceWrite(t, "pool", settled)}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AMMPools) != 1 || state.AMMPools[0].AmplificationRaw != "1500" {
+		t.Fatalf("settled ramp %#v", state.AMMPools)
+	}
+	ramping := xdr.ScMap{
+		{Key: vecVal(t, symVal(t, "pool_type")), Val: symVal(t, "stable")},
+		{Key: vecVal(t, symVal(t, "InitialA")), Val: u128ScVal(t, 1500)},
+		{Key: vecVal(t, symVal(t, "FutureA")), Val: u128ScVal(t, 3000)},
+	}
+	state, err = a.DecodeState(state, []bindings.ContractDataChange{instanceWrite(t, "pool", ramping)}, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.AMMPools[0].AmplificationRaw; got != "" {
+		t.Fatalf("mid-ramp amplification %q, want absent (the prior settled value must not survive)", got)
+	}
+}
+
 // TestSharesAbsentIsNotZero pins the transform's share semantics: "" (never
 // observed in the folded window) emits nothing regardless of lifecycle,
 // while an observed "0" emits close tombstones only for a position that

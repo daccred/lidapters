@@ -71,6 +71,7 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 			if hash, ok := instance.Executable.GetWasmHash(); ok {
 				p.WasmHash = xdr.Hash(hash).HexString()
 			}
+			var initialA, futureA string
 			if instance.Storage != nil {
 				for _, entry := range *instance.Storage {
 					switch strings.ToLower(symbolOrFirst(entry.Key)) {
@@ -120,9 +121,31 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 						p.RewardTokenID = addr(entry.Val)
 					case "a":
 						p.AmplificationRaw = firstUint(entry.Val)
+					case "initiala":
+						initialA = firstUint(entry.Val)
+					case "futurea":
+						futureA = firstUint(entry.Val)
+					case "feegrowthglobal0x128":
+						// Concentrated instance key: the pool-lifetime fee
+						// accumulator per unit of liquidity, u256 in X128
+						// fixed point.
+						p.FeeGrowthGlobal0X128 = firstUint(entry.Val)
+					case "feegrowthglobal1x128":
+						p.FeeGrowthGlobal1X128 = firstUint(entry.Val)
 					case "slot0":
 						decodeSlot0(&p, entry.Val)
 					}
+				}
+			}
+			if initialA != "" && futureA != "" {
+				// Stable amplification rides an InitialA/FutureA ramp. The
+				// pool has ONE settled amplification only when the ramp
+				// endpoints agree; a mid-ramp pool has no single value —
+				// absent is not zero, so the field empties.
+				if initialA == futureA {
+					p.AmplificationRaw = initialA
+				} else {
+					p.AmplificationRaw = ""
 				}
 			}
 		}

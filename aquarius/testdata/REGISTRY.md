@@ -71,6 +71,9 @@ Derived anchors (floor integer arithmetic, checked in Python bignum):
 | `gaoa` range amounts | L=23911740265087, [−21880, −7980), sp=32779403528916036142219842285 | (22,159,167,791,450; 1,885,240,058,815) |
 | `ga5k` range amounts | L=5782465360699, [−16560, −16480), same sp | (52,827,604,008; 0) |
 | `gbya` range amounts | L=14612333, [−887260, 887260), same sp | (35,318,162; 6,045,622) |
+| `cce5` amplification | `InitialA` = `FutureA` = `0x5dc` (`SCV_U128`), settled ramp | 1,500 |
+| `cbbm` fee growth 0 | `FeeGrowthGlobal0X128` = `SCV_U256` `0x…03b45e6124c27d0ef023fc86b6283810` | 4924211664902106266449896255854753808 |
+| `cbbm` fee growth 1 | `FeeGrowthGlobal1X128` = `SCV_U256` `0x…00bff9afc8996cd33c325f82ebf9769e` | 996792946982382866094802424747882142 |
 
 Range amounts use the X96 sqrt-price decomposition (tick → sqrt ratio via
 the standard Q128.96 bit-ladder; burn/withdraw rounding, i.e. down). Because

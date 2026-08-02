@@ -753,3 +753,64 @@ func TestIncrementalParity_CometBackstop(t *testing.T) {
 		}},
 	)
 }
+
+// TestProjectBackstopPositions covers the affected-holder projector: only the
+// dirty pairs' backstop rows come back, summaries are never emitted from a
+// backstop-only state, and an unknown pair projects nothing.
+func TestProjectBackstopPositions(t *testing.T) {
+	t.Parallel()
+
+	f := newCometFixture(t)
+	adapter, err := New(Config{AllowUnknownV2: true})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	f.register(adapter)
+	state := foldCometDeploy(t, adapter, f)
+
+	dirty := []bindings.DirtyBackstop{
+		{Address: f.userA, PoolContractID: f.poolID, Kind: bindings.DirtyUpsert},
+	}
+	out, err := adapter.ProjectBackstopPositions(state, dirty, 100, time.Unix(1000, 0).UTC())
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if len(out.Positions) != 1 {
+		t.Fatalf("expected exactly one backstop row, got %+v", out.Positions)
+	}
+	row := out.Positions[0]
+	if row.Address != f.userA || row.PositionType != contracts.PositionTypeBackstop {
+		t.Fatalf("unexpected row: %+v", row)
+	}
+	// 5000000000/10000000000 shares -> 20000000000 LP -> components 0.2 of each
+	// reserve; USD = 3.2e6*0.05*... see the neutral vectors.
+	if row.USDValue == "" {
+		t.Fatalf("expected valued USD for the folded wallet, metadata %+v", row.Metadata)
+	}
+	if out.Summaries != nil {
+		t.Fatalf("a backstop-only projection must never emit summaries, got %+v", out.Summaries)
+	}
+
+	out, err = adapter.ProjectBackstopPositions(state, []bindings.DirtyBackstop{
+		{Address: f.userA, PoolContractID: f.poolID, Kind: bindings.DirtyUpsert},
+		{Address: f.userB, PoolContractID: f.poolID, Kind: bindings.DirtyUpsert},
+	}, 100, time.Unix(1000, 0).UTC())
+	if err != nil {
+		t.Fatalf("project two: %v", err)
+	}
+	if len(out.Positions) != 2 {
+		t.Fatalf("expected both holders, got %+v", out.Positions)
+	}
+
+	// A removal pair (no row in state) projects nothing — the caller builds its
+	// tombstone from the DirtyBackstop identity.
+	out, err = adapter.ProjectBackstopPositions(state, []bindings.DirtyBackstop{
+		{Address: "GNOSUCH", PoolContractID: f.poolID, Kind: bindings.DirtyRemoval},
+	}, 100, time.Unix(1000, 0).UTC())
+	if err != nil {
+		t.Fatalf("project removal: %v", err)
+	}
+	if len(out.Positions) != 0 {
+		t.Fatalf("expected no rows for an absent pair, got %+v", out.Positions)
+	}
+}

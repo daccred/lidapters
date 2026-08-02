@@ -328,7 +328,60 @@ func (a *Adapter) ProjectPositions(state *bindings.LedgerState, dirty []bindings
 	return out, nil
 }
 
-// dirtyPositionRows gathers the raw position rows for exactly the given dirty
+// ProjectBackstopPositions projects ONLY the given dirty (address, pool)
+// backstop pairs' rows out of state — the per-ledger-emission analog of
+// ProjectPositions for the affected-backstop set (bindings.DirtyBackstop,
+// Adapter.LastDirtyBackstops, V1-09 D-10). It reuses computeState verbatim (no
+// duplicated valuation logic): a filtered LedgerState whose Backstops slice
+// holds only the dirty pairs' rows and whose Users slice is empty.
+//
+// A caller doing per-ledger backstop emission must read ONLY Positions from
+// the result: a PositionSummary computed from a backstop-only state carries
+// just the backstop leg of each address, which is a wrong row for every
+// holder with lending positions — summaries stay with the lending projection
+// (ProjectPositions) and the fold-time whole-state pass. Reserves/Contracts
+// still cover every pool (computeState always emits those from state.Pools)
+// and Activities/Quarantine are always empty (state-only re-projection).
+// Removal pairs have no row in state.Backstops and project nothing; the
+// caller synthesizes their closed tombstone from the DirtyBackstop identity.
+func (a *Adapter) ProjectBackstopPositions(state *bindings.LedgerState, dirty []bindings.DirtyBackstop, ledgerSeq int64, closeTime time.Time) (*bindings.TransformOutput, error) {
+	out := &bindings.TransformOutput{
+		LedgerSeq:  ledgerSeq,
+		Positions:  make([]bindings.Position, 0, len(dirty)),
+		Summaries:  make([]bindings.PositionSummary, 0),
+		Reserves:   make([]bindings.Reserve, 0, 16),
+		Contracts:  make([]bindings.Contract, 0, 8),
+		Quarantine: make([]bindings.QuarantineEvent, 0, 4),
+	}
+	if state == nil || len(dirty) == 0 {
+		return out, nil
+	}
+
+	want := make(map[string]struct{}, len(dirty))
+	for _, d := range dirty {
+		want[dirtyPairKey(d.Address, d.PoolContractID)] = struct{}{}
+	}
+	backstops := make([]contracts.BackstopPosition, 0, len(dirty))
+	for _, b := range state.Backstops {
+		if _, ok := want[dirtyPairKey(b.Address, b.PoolContractID)]; ok {
+			backstops = append(backstops, b)
+		}
+	}
+	filtered := *state
+	filtered.Users = nil
+	filtered.Backstops = backstops
+
+	if err := a.computeState(bindings.TransformInput{LedgerSeq: ledgerSeq, CloseTime: closeTime, State: &filtered}, out); err != nil {
+		return nil, err
+	}
+	// A summary computed from a backstop-only state carries just the backstop
+	// leg of each address — a wrong row for any holder with lending positions.
+	// Drop them so a caller cannot merge a partial-vintage total by mistake;
+	// summaries stay with the lending projection and the whole-state pass.
+	out.Summaries = nil
+	return out, nil
+}
+
 // pairs. When the active strategy implements dirtyUserPositions (incremental
 // mode), each pair is an O(1) cache lookup; otherwise it falls back to a
 // single O(all users) scan of state.Users, matching a pair to its rows.

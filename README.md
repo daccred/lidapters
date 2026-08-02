@@ -1,13 +1,5 @@
 # Lidapters
 
-> **This repository is frozen.** Development of the adapter library continues
-> inside [relay.lightgate.xyz](https://github.com/daccred/relay.lightgate.xyz)
-> under `internal/lidapters/`, where the full git history of this repository is
-> preserved via subtree merge. The final module release is
-> [v0.12.1](https://github.com/daccred/lidapters/releases/tag/v0.12.1); no
-> further tags will be published. History, releases, and issues remain public
-> record. Report adapter bugs on the relay repository.
-
 Public adapter module for Lightgate protocol adapters.
 
 The module is nested per protocol. Shared, protocol-agnostic seam types live in

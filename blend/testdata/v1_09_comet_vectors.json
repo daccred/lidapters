@@ -30,7 +30,7 @@
     },
     {
       "name": "floor_stages_bite",
-      "comment": "Every division has a nonzero remainder: a ceil anywhere changes the pinned integers.",
+      "comment": "Both component divisions have a nonzero remainder: a ceil in either component stage changes the pinned integers. The shares->LP division is exact here; share_stage_floor_bites pins that stage.",
       "input": {
         "user_shares": "3333333333",
         "pool_shares": "10000000000",
@@ -46,6 +46,27 @@
         "blnd_component": "10666666665600",
         "usdc_component": "533333333280",
         "usd_value": "106666.666656",
+        "absent_reason": ""
+      }
+    },
+    {
+      "name": "share_stage_floor_bites",
+      "comment": "The shares->LP division has remainder 3333333331 of 10000000000: a ceil in the share stage yields lp_tokens 13333333325 and changes every downstream integer.",
+      "input": {
+        "user_shares": "3333333331",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000001",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000001",
+        "usdc_reserve": "4000000000001",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "13333333324",
+        "blnd_component": "10666666659200",
+        "usdc_component": "533333332960",
+        "usd_value": "106666.666592",
         "absent_reason": ""
       }
     },

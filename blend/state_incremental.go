@@ -98,7 +98,7 @@ func newIncrementalStrategy(a *Adapter) *incrementalStrategy {
 	return &incrementalStrategy{adapter: a}
 }
 
-func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
+func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DirtyBackstop, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
 	if s.mirror == nil || prior != s.lastOut || s.bisect.reloadEachLedger {
 		// Not a continuation of our own last output: rebuild the mirror from
 		// prior exactly as paranoid would. One O(total state) ledger, then the
@@ -112,11 +112,11 @@ func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes [
 		s.mirror.apply(change, ledgerSeq)
 	}
 	sortTypedStateDeltas(s.mirror.deltas)
-	out, dirty := s.snapshot(closeTime)
+	out, dirty, dirtyBackstops := s.snapshot(closeTime)
 	sortDecodeDiagnostics(s.mirror.diagnostics)
 	temporary := finalizeTemporaryStateChanges(s.mirror.dirtyTemporary, s.mirror.auctions, s.mirror.queuedReserves)
 	s.lastOut = out
-	return out, s.mirror.deltas, dirty, s.mirror.diagnostics, temporary
+	return out, s.mirror.deltas, dirty, dirtyBackstops, s.mirror.diagnostics, temporary
 }
 
 // reseed rebuilds the mirror from prior via the same loadPrior the paranoid
@@ -162,6 +162,8 @@ func (s *incrementalStrategy) refreshOwned() {
 	s.mirror.owned = s.adapter.contracts
 	s.mirror.ownedAssets = s.adapter.assets
 	s.mirror.ownedFeeds = s.adapter.feeds
+	s.mirror.ownedComets = s.adapter.comets
+	s.mirror.protocol = s.adapter.cfg.Protocol
 }
 
 // normalizeCarry replays the lossy parts of the paranoid build->loadPrior
@@ -187,6 +189,12 @@ func (s *incrementalStrategy) normalizeCarry() {
 	b.deltas = nil
 	b.diagnostics = nil
 	b.dirtyTemporary = map[string]bindings.TemporaryStateChange{}
+	// Per-ledger dirty/price-invalidation scratch, reset exactly as a fresh
+	// paranoid builder starts empty: the fold's affected-holder set reflects
+	// only this ledger's changes.
+	b.dirtyBackstops = map[string]backstopIdentity{}
+	b.changedFeeds = map[string]struct{}{}
+	b.changedPriceAssets = map[string]struct{}{}
 	for id, oracle := range b.oracles {
 		if oracle.synthesized {
 			delete(b.oracles, id)
@@ -226,7 +234,7 @@ func (s *incrementalStrategy) normalizeCarry() {
 // build() in state.go — same statements, same order — except pending/users,
 // which come from the caches. Any edit to build() must be mirrored here; the
 // parity suite fails loudly when the two drift.
-func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerState, []bindings.DirtyPosition) {
+func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerState, []bindings.DirtyPosition, []bindings.DirtyBackstop) {
 	b := s.mirror
 	b.resolveAggregatorPrices(closeTime)
 	b.resolveOraclePrices()
@@ -279,6 +287,15 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 	// paranoid's decodeBlendState uses (finalizeDirtyPositions), so the two
 	// strategies expose an identical set for the same ledger.
 	dirty := finalizeDirtyPositions(s.dirty, b.pendingPos)
+
+	// The affected-backstop analog of the line above: same derivation paranoid's
+	// decodeBlendState runs (feed-price propagation, then finalize against the
+	// post-apply balances), so the two strategies expose an identical set.
+	b.propagateFeedPriceDirty()
+	for assetID := range b.changedPriceAssets {
+		b.markPriceAssetDirty(assetID)
+	}
+	dirtyBackstops := finalizeDirtyBackstops(b.dirtyBackstops, b.backstopUsers)
 
 	for composite, identity := range s.dirty {
 		pending, live := b.pendingPos[composite]
@@ -352,7 +369,8 @@ func (s *incrementalStrategy) snapshot(closeTime time.Time) (*bindings.LedgerSta
 		UserEmissions:        b.buildUserEmissions(),
 		QueuedReserves:       b.buildQueuedReserves(),
 		BackstopInstances:    b.buildBackstopInstances(),
-	}, dirty
+		AMMPools:             b.buildAMMPools(),
+	}, dirty, dirtyBackstops
 }
 
 // rebuildPendingUsers is the paranoid assembly of pending/users (build()'s

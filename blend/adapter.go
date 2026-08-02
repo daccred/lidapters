@@ -31,6 +31,12 @@ var _ bindings.CloseTimeStateDecoder = (*Adapter)(nil)
 // (math.go).
 var _ bindings.DirtyPositionsProvider = (*Adapter)(nil)
 
+// Adapter exposes the per-ledger affected-backstop set from its most recent
+// DecodeState/DecodeStateAt call, so a consumer doing dirty-mode emission can
+// re-emit exactly the invalidated backstop positions (O(affected holders))
+// instead of stripping them wholesale. See bindings.DirtyBackstopsProvider.
+var _ bindings.DirtyBackstopsProvider = (*Adapter)(nil)
+
 // Adapter exposes the skipped-leg diagnostics from its most recent
 // DecodeState/DecodeStateAt call, so a consumer can log and count the position
 // legs the fold could not attribute instead of discovering corrupted rows
@@ -67,6 +73,14 @@ type Adapter struct {
 	// would otherwise be misdecoded as a phantom pool. Same config-like status
 	// as contracts; does not affect DecodeState purity.
 	feeds map[string]struct{}
+	// comets is the registered Comet (BToken) LP contract set the relay edge
+	// fills via RegisterCometContracts. A Comet's contract_data (the pool's
+	// AllTokenVec/AllRecordData/TotalShares persistent entries) is routed onto
+	// the Comet decode path (state_comet.go) ahead of every Blend branch.
+	// Deliberately distinct from contracts: Comet state can never decode as
+	// Blend pool state and Blend state never as Comet (D-03). Same config-like
+	// status as contracts; does not affect DecodeState purity.
+	comets map[string]struct{}
 	// state is the state-fold strategy DecodeState delegates to, selected once
 	// at New from Config.StateMode and swapped as a whole class — paranoid (the
 	// stateless reference reducer) or incremental (the persistent-builder
@@ -76,6 +90,10 @@ type Adapter struct {
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDirtyPositions / bindings.DirtyPositionsProvider.
 	lastDirty []bindings.DirtyPosition
+	// lastDirtyBackstops is the affected-backstop set from the most recent
+	// DecodeState/DecodeStateAt call, overwritten by the next one. See
+	// LastDirtyBackstops / bindings.DirtyBackstopsProvider.
+	lastDirtyBackstops []bindings.DirtyBackstop
 	// lastDiagnostics is the skipped-leg diagnostic set from the most recent
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDecodeDiagnostics / bindings.DecodeDiagnosticsProvider.
@@ -92,6 +110,15 @@ type Adapter struct {
 // was an upsert or a tombstone removal. See bindings.DirtyPositionsProvider.
 func (a *Adapter) LastDirtyPositions() []bindings.DirtyPosition {
 	return a.lastDirty
+}
+
+// LastDirtyBackstops returns the (address, pool) backstop pairs whose
+// valuation inputs the most recent DecodeState/DecodeStateAt call invalidated
+// — holder balance/emission writes, pool PoolBalance writes, linked Comet
+// reserve/supply writes, or BLND/USDC price changes — and whether each pair
+// still has a balance after the fold. See bindings.DirtyBackstopsProvider.
+func (a *Adapter) LastDirtyBackstops() []bindings.DirtyBackstop {
+	return a.lastDirtyBackstops
 }
 
 // LastDecodeDiagnostics returns the non-zero position legs the most recent

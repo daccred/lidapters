@@ -46,8 +46,9 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 // incremental produces byte-identical output from a carried mirror. See
 // state_strategy.go for the two-mode contract.
 func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
-	next, _, dirty, diagnostics, temporary := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
+	next, _, dirty, dirtyBackstops, diagnostics, temporary := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
 	a.lastDirty = dirty
+	a.lastDirtyBackstops = dirtyBackstops
 	a.lastDiagnostics = diagnostics
 	a.lastTemporaryChanges = temporary
 	return next, nil
@@ -65,6 +66,9 @@ func (a *Adapter) OwnsContract(contractID string) bool {
 		return true
 	}
 	if _, ok := a.feeds[contractID]; ok {
+		return true
+	}
+	if _, ok := a.comets[contractID]; ok {
 		return true
 	}
 	_, ok := a.assets[contractID]
@@ -121,6 +125,25 @@ func (a *Adapter) RegisterPriceFeeds(ids ...string) {
 	}
 }
 
+// RegisterCometContracts adds Comet (BToken) LP contract IDs to the registered
+// Comet set. Idempotent; ignores blank IDs. Called by the relay's projector
+// edge from static config (it is NOT called from the pure DecodeState path): a
+// Comet must be owned from the first folded ledger, or the projector filters
+// its reserve/supply writes out before decode and the backstop's LP valuation
+// inputs can never fold. The set is deliberately distinct from RegisterContracts:
+// Comet instance/persistent data routes only to the Comet reducer
+// (state_comet.go), never to the Blend pool decoder (D-03).
+func (a *Adapter) RegisterCometContracts(ids ...string) {
+	if a.comets == nil {
+		a.comets = map[string]struct{}{}
+	}
+	for _, id := range ids {
+		if id != "" {
+			a.comets[id] = struct{}{}
+		}
+	}
+}
+
 type typedStateDelta struct {
 	LedgerSeq  int64
 	EntityType string
@@ -155,10 +178,14 @@ type blendStateBuilder struct {
 	// backstopInstances holds each backstop contract's decoded identity
 	// (instance addresses + RZ/DropList), keyed by contract ID.
 	backstopInstances map[string]*contracts.BackstopInstanceState
-	oracles           map[string]*oracleBuilder
-	feeds             map[string]*feedBuilder
-	aggregators       map[string]*aggregatorBuilder
-	assets            map[string]contracts.AssetMetadata
+	// comets holds each registered Comet (BToken) contract's folded LP state,
+	// keyed by contract ID. Populated only for contracts in ownedComets;
+	// carried across ledgers via LedgerState.AMMPools (PoolType "comet").
+	comets      map[string]*cometPoolBuilder
+	oracles     map[string]*oracleBuilder
+	feeds       map[string]*feedBuilder
+	aggregators map[string]*aggregatorBuilder
+	assets      map[string]contracts.AssetMetadata
 	// owned is the adapter's owned-contract set, threaded in so the reducer can
 	// tell an oracle's contract_data apart from a pool's. It is read-only config,
 	// not per-ledger scratch, so it does not break the run-twice purity guarantee.
@@ -173,7 +200,15 @@ type blendStateBuilder struct {
 	// routed onto the Reflector decode path (state_reflector.go) and never
 	// mistaken for a pool or a mock oracle.
 	ownedFeeds map[string]struct{}
-	deltas     []typedStateDelta
+	// ownedComets is the adapter's registered Comet (BToken) contract set,
+	// threaded in the same read-only-config way, so a Comet's contract_data is
+	// always routed onto the Comet decode path (state_comet.go) and never
+	// mistaken for a Blend pool, oracle, or asset.
+	ownedComets map[string]struct{}
+	// protocol is the adapter's configured protocol ID, threaded onto emitted
+	// AMMPoolState rows. Read-only config, like the owned sets.
+	protocol string
+	deltas   []typedStateDelta
 	// ledgerSeq is the ledger currently being folded, threaded onto the builder
 	// so the position-skip diagnostics emitted during build carry it. Set once
 	// per decode, before apply runs.
@@ -203,6 +238,26 @@ type blendStateBuilder struct {
 	// identity comes from the changed ledger key, so a removal is reportable
 	// even when the fold never observed the entry's create.
 	dirtyTemporary map[string]bindings.TemporaryStateChange
+	// dirtyBackstops collects the identity of every backstop (address, pool)
+	// pair whose valuation inputs this ledger's changes invalidated — the
+	// holder's own balance/emission write, its pool's PoolBalance, a linked
+	// Comet write, or a price change for its BLND/USDC legs. Per-ledger scratch
+	// like dirtyUsers; finalized into the bindings.DirtyBackstop set exposed
+	// via Adapter.LastDirtyBackstops (D-10).
+	dirtyBackstops map[string]backstopIdentity
+	// changedFeeds / changedPriceAssets are this ledger's price-invalidation
+	// signals, recorded during apply and consumed by the backstop dirty
+	// finalize: a feed round write (aggregator-synthesized prices move) and a
+	// mock-oracle price write/delete for a resolvable asset.
+	changedFeeds       map[string]struct{}
+	changedPriceAssets map[string]struct{}
+}
+
+// backstopIdentity is the (address, pool) pair behind a backstopUsers
+// composite key — the dirtyBackstops analog of userIdentity.
+type backstopIdentity struct {
+	address string
+	pool    string
 }
 
 // userIdentity is the (address, pool) pair behind a pendingPos composite key —
@@ -310,21 +365,25 @@ func (d backstopEmisData) empty() bool {
 
 func newBlendStateBuilder() *blendStateBuilder {
 	return &blendStateBuilder{
-		pools:             map[string]*poolBuilder{},
-		pendingPos:        map[string]pendingUserPositions{},
-		backstopPools:     map[string]backstopPoolBalance{},
-		backstopUsers:     map[string]backstopUserBalance{},
-		backstopEmis:      map[string]backstopEmisData{},
-		auctions:          map[string]contracts.AuctionState{},
-		userEmis:          map[string]contracts.UserEmissionState{},
-		queuedReserves:    map[string]contracts.QueuedReserveState{},
-		backstopInstances: map[string]*contracts.BackstopInstanceState{},
-		oracles:           map[string]*oracleBuilder{},
-		feeds:             map[string]*feedBuilder{},
-		aggregators:       map[string]*aggregatorBuilder{},
-		assets:            map[string]contracts.AssetMetadata{},
-		dirtyUsers:        map[string]userIdentity{},
-		dirtyTemporary:    map[string]bindings.TemporaryStateChange{},
+		pools:              map[string]*poolBuilder{},
+		pendingPos:         map[string]pendingUserPositions{},
+		backstopPools:      map[string]backstopPoolBalance{},
+		backstopUsers:      map[string]backstopUserBalance{},
+		backstopEmis:       map[string]backstopEmisData{},
+		auctions:           map[string]contracts.AuctionState{},
+		userEmis:           map[string]contracts.UserEmissionState{},
+		queuedReserves:     map[string]contracts.QueuedReserveState{},
+		backstopInstances:  map[string]*contracts.BackstopInstanceState{},
+		comets:             map[string]*cometPoolBuilder{},
+		oracles:            map[string]*oracleBuilder{},
+		feeds:              map[string]*feedBuilder{},
+		aggregators:        map[string]*aggregatorBuilder{},
+		assets:             map[string]contracts.AssetMetadata{},
+		dirtyUsers:         map[string]userIdentity{},
+		dirtyTemporary:     map[string]bindings.TemporaryStateChange{},
+		dirtyBackstops:     map[string]backstopIdentity{},
+		changedFeeds:       map[string]struct{}{},
+		changedPriceAssets: map[string]struct{}{},
 	}
 }
 
@@ -332,15 +391,19 @@ func newBlendStateBuilder() *blendStateBuilder {
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
 // built state, the silver-debug deltas, the ledger's dirty-positions set (see
-// markPoolRemapDirty and bindings.DirtyPosition), the ledger's skipped-leg
-// diagnostics (see positionSkipSink and bindings.DecodeDiagnostic), and the
-// ledger's auction/queued-reserve transition set (see
-// finalizeTemporaryStateChanges and bindings.TemporaryStateChange).
-func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
+// markPoolRemapDirty and bindings.DirtyPosition), the affected-backstop set
+// (see finalizeDirtyBackstops and bindings.DirtyBackstop), the ledger's
+// skipped-leg diagnostics (see positionSkipSink and
+// bindings.DecodeDiagnostic), and the ledger's auction/queued-reserve
+// transition set (see finalizeTemporaryStateChanges and
+// bindings.TemporaryStateChange).
+func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DirtyBackstop, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	b.ownedAssets = a.assets
 	b.ownedFeeds = a.feeds
+	b.ownedComets = a.comets
+	b.protocol = a.cfg.Protocol
 	b.ledgerSeq = ledgerSeq
 	if prior != nil {
 		b.loadPrior(prior)
@@ -356,6 +419,14 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	// identical dirty set regardless of which one is active.
 	markPoolRemapDirty(b.dirtyUsers, reserveIndexSnapshot(prior), b)
 	dirty := finalizeDirtyPositions(b.dirtyUsers, b.pendingPos)
+	// Feed writes recorded during apply move aggregator-synthesized prices;
+	// route the assets they serve through the backstop-invalidation join before
+	// finalizing the affected-holder set.
+	b.propagateFeedPriceDirty()
+	for assetID := range b.changedPriceAssets {
+		b.markPriceAssetDirty(assetID)
+	}
+	dirtyBackstops := finalizeDirtyBackstops(b.dirtyBackstops, b.backstopUsers)
 	temporary := finalizeTemporaryStateChanges(b.dirtyTemporary, b.auctions, b.queuedReserves)
 
 	// The deltas are appended from map-range iteration over the builder maps
@@ -368,7 +439,7 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	sortTypedStateDeltas(b.deltas)
 	sortDecodeDiagnostics(b.diagnostics)
 
-	return next, b.deltas, dirty, b.diagnostics, temporary
+	return next, b.deltas, dirty, dirtyBackstops, b.diagnostics, temporary
 }
 
 // reserveIndexSnapshot derives each pool's reserveByIndex mapping (known,
@@ -635,6 +706,15 @@ func (b *blendStateBuilder) loadPrior(prior *bindings.LedgerState) {
 	for _, agg := range prior.OracleAggregators {
 		b.aggregators[agg.ContractID] = aggregatorBuilderFromState(agg)
 	}
+	for _, pool := range prior.AMMPools {
+		// Comet facets are written once at deploy (AllTokenVec) and only in the
+		// ledger they change (AllRecordData, TotalShares) — same carry
+		// requirement as the oracle instance. Only registered Comet contracts
+		// are restored: anything else on AMMPools belongs to another adapter.
+		if _, ok := b.ownedComets[pool.ContractID]; ok {
+			b.restoreComet(pool)
+		}
+	}
 }
 
 // build assembles the typed LedgerState from the mirror, sorting every slice so
@@ -711,6 +791,7 @@ func (b *blendStateBuilder) build(closeTime time.Time) bindings.LedgerState {
 		UserEmissions:        b.buildUserEmissions(),
 		QueuedReserves:       b.buildQueuedReserves(),
 		BackstopInstances:    b.buildBackstopInstances(),
+		AMMPools:             b.buildAMMPools(),
 	}
 }
 
@@ -905,6 +986,17 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 	// otherwise be misdecoded as a phantom pool by the wasm-hash sniff below.
 	if _, isFeed := b.ownedFeeds[change.ContractID]; isFeed {
 		b.applyFeedChange(change.ContractID, key, value)
+		b.changedFeeds[change.ContractID] = struct{}{}
+		return
+	}
+
+	// A registered Comet (BToken) contract's contract_data is always decoded on
+	// the Comet path (state_comet.go), ahead of every Blend branch below: its
+	// instance carries a wasm executable and would otherwise be misdecoded as a
+	// phantom pool, and its persistent DataKey enum variants must never reach
+	// the Blend pool key switch.
+	if _, isComet := b.ownedComets[change.ContractID]; isComet {
+		b.applyCometChange(change, key, value, ledgerSeq)
 		return
 	}
 
@@ -1105,6 +1197,8 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		b.backstopPools[poolID] = balance
 		b.addDelta(ledgerSeq, "backstop_pool", poolID, true, typedBackstopPool(balance))
 		b.appendBackstopUsersForPool(poolID, ledgerSeq)
+		// The shares<->LP conversion moved for every holder of this pool.
+		b.markBackstopPoolDirty(poolID)
 	case "UserBalance":
 		poolID, user, ok := backstopPoolUser(args)
 		if !ok {
@@ -1118,6 +1212,7 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 			balance.emisAccruedRaw = existing.emisAccruedRaw
 		}
 		b.backstopUsers[typedBackstopEntityKey(user, poolID)] = balance
+		b.markBackstopDirty(user, poolID)
 		b.addDelta(ledgerSeq, "backstop_position", typedBackstopEntityKey(user, poolID), true, b.backstopPosition(balance))
 	case "BEmisData":
 		poolID, ok := variantAddress(args)
@@ -1151,6 +1246,7 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		balance.emisIndexRaw = indexRaw
 		balance.emisAccruedRaw = accruedRaw
 		b.backstopUsers[entityKey] = balance
+		b.markBackstopDirty(user, poolID)
 		b.addDelta(ledgerSeq, "backstop_position", entityKey, true, b.backstopPosition(balance))
 	case "Auction":
 		user, auctType, ok := auctionKeyParts(args)
@@ -1240,6 +1336,13 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		// normally a no-op. Absorbed here regardless so a feed's deletes never
 		// fall through to the pool delete logic.
 		b.applyFeedDelete(change.ContractID, key)
+		b.changedFeeds[change.ContractID] = struct{}{}
+		return
+	}
+	if _, isComet := b.ownedComets[change.ContractID]; isComet {
+		// A registered Comet's not-live changes go absent on the Comet facet they
+		// name (state_comet.go), never to the Blend pool delete logic.
+		b.applyCometDelete(change, key, ledgerSeq)
 		return
 	}
 	if _, isAsset := b.ownedAssets[change.ContractID]; isAsset {
@@ -1261,6 +1364,7 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		if index, ok := scInt64(key); ok {
 			if oracle := b.oracles[change.ContractID]; oracle != nil {
 				delete(oracle.priceByIndex, index)
+				b.markOraclePriceAssetDirty(oracle, index)
 			}
 		}
 		return
@@ -1437,12 +1541,15 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		delete(b.backstopPools, poolID)
 		b.addDelta(ledgerSeq, "backstop_pool", poolID, false, nil)
 		b.appendBackstopUsersForPool(poolID, ledgerSeq)
+		// Every holder's shares<->LP conversion lost its denominator.
+		b.markBackstopPoolDirty(poolID)
 	case "UserBalance":
 		poolID, user, ok := backstopPoolUser(args)
 		if !ok {
 			return
 		}
 		entityKey := typedBackstopEntityKey(user, poolID)
+		b.markBackstopDirty(user, poolID)
 		// The sibling UEmisData entry survives a UserBalance delete on-chain
 		// (accrued-but-unclaimed emissions persist after a full withdrawal), so
 		// only the balance half is cleared; the row is dropped when nothing
@@ -1473,6 +1580,7 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		if !exists {
 			return
 		}
+		b.markBackstopDirty(user, poolID)
 		balance.emisIndexRaw = ""
 		balance.emisAccruedRaw = ""
 		if balance.sharesRaw == "" && len(balance.q4w) == 0 {
@@ -1580,6 +1688,29 @@ func buildUserPositionsForPending(pool *poolBuilder, pending pendingUserPosition
 
 func (b *blendStateBuilder) backstopPosition(userBalance backstopUserBalance) contracts.BackstopPosition {
 	poolBalance := b.backstopPools[userBalance.poolContract]
+
+	// Comet LP valuation inputs (V1-09): the folded Comet pool behind this
+	// backstop's BToken, joined by exact token ID (never vector position), plus
+	// each leg's ledger-pinned price binding (tokenPriceUSD — the folded pool
+	// reserve whose asset IS that token, first in ascending pool order). Every
+	// facet stays "" while its identity is incomplete: no Comet, no record, no
+	// supply, or no folded price source is explicit absence, never a fabricated
+	// zero and never a hardcoded $1 (D-09).
+	lpSupply := ""
+	blndReserve := ""
+	usdcReserve := ""
+	blndPrice := ""
+	usdcPrice := ""
+	if instance := b.backstopInstanceForPool(userBalance.poolContract); instance != nil {
+		if comet := b.cometForBackstopInstance(instance); comet != nil {
+			lpSupply = comet.lpSupplyRaw()
+			blndReserve = comet.reserveOf(instance.BLNDToken)
+			usdcReserve = comet.reserveOf(instance.USDCToken)
+		}
+		blndPrice = b.tokenPriceUSD(instance.BLNDToken)
+		usdcPrice = b.tokenPriceUSD(instance.USDCToken)
+	}
+
 	return contracts.BackstopPosition{
 		Address:        userBalance.user,
 		PoolContractID: userBalance.poolContract,
@@ -1593,11 +1724,11 @@ func (b *blendStateBuilder) backstopPosition(userBalance backstopUserBalance) co
 		EmisIndexRaw:          userBalance.emisIndexRaw,
 		BLNDDecimals:          7,
 		USDCDecimals:          7,
-		LPTokenSupplyRaw:      "",
-		LPBLNDReserveRaw:      "",
-		LPUSDCReserveRaw:      "",
-		BLNDPriceUSD:          "",
-		USDCPriceUSD:          "",
+		LPTokenSupplyRaw:      lpSupply,
+		LPBLNDReserveRaw:      blndReserve,
+		LPUSDCReserveRaw:      usdcReserve,
+		BLNDPriceUSD:          blndPrice,
+		USDCPriceUSD:          usdcPrice,
 		BackstopInterestAPY:   "",
 		BackstopEmissionsAPY:  "",
 	}
@@ -2079,6 +2210,20 @@ func (b *blendStateBuilder) applyOraclePrice(oracleID string, key, value xdr.ScV
 	}
 	oracle := b.ensureOracle(oracleID)
 	oracle.priceByIndex[index] = priceRaw
+	b.markOraclePriceAssetDirty(oracle, index)
+}
+
+// markOraclePriceAssetDirty records the asset behind an oracle price index as
+// price-affected this ledger (the backstop dirty finalize joins it to BLND/USDC
+// legs). An index the oracle's asset map does not resolve marks nothing — an
+// unknown binding is explicit absence, never a guessed join.
+func (b *blendStateBuilder) markOraclePriceAssetDirty(oracle *oracleBuilder, index int64) {
+	for assetID, assetIndex := range oracle.assetToIndex {
+		if assetIndex == index {
+			b.changedPriceAssets[assetID] = struct{}{}
+			return
+		}
+	}
 }
 
 // applyAssetInstance decodes a registered token contract's contract-instance

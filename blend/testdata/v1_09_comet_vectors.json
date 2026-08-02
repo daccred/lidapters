@@ -1,0 +1,174 @@
+{
+  "schema": "lidapters/v1-09-comet-vectors@1",
+  "provenance": "Expected values generated 2026-08-02 by a standalone integer oracle (exact rational arithmetic, Python fractions — no lidapters, relay, or relay.rs code) over the pinned Comet layout (CometDEX/comet-contracts-v1@ef4cbfad0a35202ad267c14d163d2f362995a8d3: AllTokenVec / AllRecordData Record.balance / TotalShares) and the Blend backstop conversion staging (shares -> LP tokens FLOOR, LP tokens -> per-component FLOOR, components x folded prices). Consumers must not regenerate these from production output.",
+  "component_decimals": 7,
+  "absent_reasons": {
+    "lp_state_unavailable": "supply or a reserve leg never folded (missing is not zero)",
+    "lp_denominator_zero": "TotalShares folded as a real stored zero; the quotient is undefined",
+    "price_unavailable": "one or both folded price legs absent (never hardcoded $1)"
+  },
+  "vectors": [
+    {
+      "name": "exact_whole_lp",
+      "input": {
+        "user_shares": "5000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "0.9999999"
+      },
+      "expect": {
+        "lp_tokens": "20000000000",
+        "blnd_component": "16000000000000",
+        "usdc_component": "800000000000",
+        "usd_value": "159999.992",
+        "absent_reason": ""
+      }
+    },
+    {
+      "name": "floor_stages_bite",
+      "comment": "Every division has a nonzero remainder: a ceil anywhere changes the pinned integers.",
+      "input": {
+        "user_shares": "3333333333",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000001",
+        "usdc_reserve": "4000000000001",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "13333333332",
+        "blnd_component": "10666666665600",
+        "usdc_component": "533333333280",
+        "usd_value": "106666.666656",
+        "absent_reason": ""
+      }
+    },
+    {
+      "name": "shares_equal_pool_verbatim",
+      "comment": "shares == pool_shares short-circuits to pool_tokens verbatim (no floor).",
+      "input": {
+        "user_shares": "10000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000007",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "40000000007",
+        "blnd_component": "32000000005600",
+        "usdc_component": "1600000000280",
+        "usd_value": "320000.000056",
+        "absent_reason": ""
+      }
+    },
+    {
+      "name": "observed_zero_position_is_present_zero",
+      "input": {
+        "user_shares": "0",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "0",
+        "blnd_component": "0",
+        "usdc_component": "0",
+        "usd_value": "0",
+        "absent_reason": ""
+      }
+    },
+    {
+      "name": "missing_supply_is_absent",
+      "input": {
+        "user_shares": "5000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": null,
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "20000000000",
+        "blnd_component": null,
+        "usdc_component": null,
+        "usd_value": null,
+        "absent_reason": "lp_state_unavailable"
+      }
+    },
+    {
+      "name": "zero_supply_denominator_is_absent",
+      "input": {
+        "user_shares": "5000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "0",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "20000000000",
+        "blnd_component": null,
+        "usdc_component": null,
+        "usd_value": null,
+        "absent_reason": "lp_denominator_zero"
+      }
+    },
+    {
+      "name": "missing_reserve_leg_is_absent",
+      "input": {
+        "user_shares": "5000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": null,
+        "blnd_price_usd": "0.05",
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "20000000000",
+        "blnd_component": null,
+        "usdc_component": null,
+        "usd_value": null,
+        "absent_reason": "lp_state_unavailable"
+      }
+    },
+    {
+      "name": "missing_price_leg_keeps_components_but_not_usd",
+      "input": {
+        "user_shares": "5000000000",
+        "pool_shares": "10000000000",
+        "pool_tokens": "40000000000",
+        "lp_supply": "100000000000",
+        "blnd_reserve": "80000000000000",
+        "usdc_reserve": "4000000000000",
+        "blnd_price_usd": null,
+        "usdc_price_usd": "1"
+      },
+      "expect": {
+        "lp_tokens": "20000000000",
+        "blnd_component": "16000000000000",
+        "usdc_component": "800000000000",
+        "usd_value": null,
+        "absent_reason": "price_unavailable"
+      }
+    }
+  ]
+}

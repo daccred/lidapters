@@ -380,68 +380,14 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 	// verbatim (per-asset lot/bid maps, start block, typed label). The slice in
 	// state is already deterministically sorted by the fold.
 	for _, auction := range input.State.Auctions {
-		typeLabel := auctionTypeLabel(auction.AuctionType)
-		lot := make([]bindings.AuctionAmount, 0, len(auction.Lot))
-		for _, entry := range auction.Lot {
-			lot = append(lot, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
-		}
-		bid := make([]bindings.AuctionAmount, 0, len(auction.Bid))
-		for _, entry := range auction.Bid {
-			bid = append(bid, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
-		}
-		output.Auctions = append(output.Auctions, bindings.Auction{
-			ID:          stableID(a.cfg.Protocol, auction.PoolContractID, auction.UserAddress, typeLabel, "auction"),
-			Protocol:    a.cfg.Protocol,
-			ContractID:  auction.PoolContractID,
-			UserAddress: auction.UserAddress,
-			AuctionType: typeLabel,
-			Block:       auction.Block,
-			Lot:         lot,
-			Bid:         bid,
-			LedgerSeq:   input.LedgerSeq,
-			Timestamp:   input.CloseTime,
-		})
+		output.Auctions = append(output.Auctions, a.auctionRow(auction, input.LedgerSeq, input.CloseTime))
 	}
 
 	// Pending, time-locked reserve-parameter changes (ResInit): the "params
 	// about to change" signal, surfaced verbatim. NewConfig carries only the
 	// fields present on-chain. The slice in state is deterministically sorted.
 	for _, queued := range input.State.QueuedReserves {
-		var unlockTime time.Time
-		if unix, ok := parseUnixSeconds(queued.UnlockTimeRaw); ok {
-			unlockTime = unix
-		}
-		newConfig := map[string]string{}
-		for key, value := range map[string]string{
-			"index":      queued.NewConfig.IndexRaw,
-			"decimals":   queued.NewConfig.DecimalsRaw,
-			"c_factor":   queued.NewConfig.CFactorRaw,
-			"l_factor":   queued.NewConfig.LFactorRaw,
-			"util":       queued.NewConfig.UtilRaw,
-			"max_util":   queued.NewConfig.MaxUtilRaw,
-			"r_base":     queued.NewConfig.RBaseRaw,
-			"r_one":      queued.NewConfig.ROneRaw,
-			"r_two":      queued.NewConfig.RTwoRaw,
-			"r_three":    queued.NewConfig.RThreeRaw,
-			"reactivity": queued.NewConfig.ReactivityRaw,
-			"supply_cap": queued.NewConfig.SupplyCapRaw,
-			"enabled":    queued.NewConfig.Enabled,
-		} {
-			if value != "" {
-				newConfig[key] = value
-			}
-		}
-		output.QueuedReserves = append(output.QueuedReserves, bindings.QueuedReserve{
-			ID:            stableID(a.cfg.Protocol, queued.PoolContractID, queued.AssetID, "queued_reserve"),
-			Protocol:      a.cfg.Protocol,
-			ContractID:    queued.PoolContractID,
-			AssetID:       queued.AssetID,
-			UnlockTimeRaw: queued.UnlockTimeRaw,
-			UnlockTime:    unlockTime,
-			NewConfig:     newConfig,
-			LedgerSeq:     input.LedgerSeq,
-			Timestamp:     input.CloseTime,
-		})
+		output.QueuedReserves = append(output.QueuedReserves, a.queuedReserveRow(queued, input.LedgerSeq, input.CloseTime))
 	}
 
 	// The backstop contract's decoded identity: a Contract row (gold's
@@ -1301,6 +1247,158 @@ func reserveKey(poolContract, assetID string) string {
 
 func parseDecimalsInt(v int32) string {
 	return strconv.FormatInt(int64(v), 10)
+}
+
+// auctionRow builds the gold-facing bindings.Auction for one live auction
+// state. Shared by computeState's full-state loop and
+// ProjectTemporaryStateChanges so both emit the identical row shape.
+func (a *Adapter) auctionRow(auction contracts.AuctionState, ledgerSeq int64, closeTime time.Time) bindings.Auction {
+	typeLabel := auctionTypeLabel(auction.AuctionType)
+	lot := make([]bindings.AuctionAmount, 0, len(auction.Lot))
+	for _, entry := range auction.Lot {
+		lot = append(lot, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
+	}
+	bid := make([]bindings.AuctionAmount, 0, len(auction.Bid))
+	for _, entry := range auction.Bid {
+		bid = append(bid, bindings.AuctionAmount{AssetID: entry.AssetID, AmountRaw: entry.AmountRaw})
+	}
+	return bindings.Auction{
+		ID:          stableID(a.cfg.Protocol, auction.PoolContractID, auction.UserAddress, typeLabel, "auction"),
+		Protocol:    a.cfg.Protocol,
+		ContractID:  auction.PoolContractID,
+		UserAddress: auction.UserAddress,
+		AuctionType: typeLabel,
+		Block:       auction.Block,
+		Lot:         lot,
+		Bid:         bid,
+		LedgerSeq:   ledgerSeq,
+		Timestamp:   closeTime,
+	}
+}
+
+// queuedReserveRow builds the gold-facing bindings.QueuedReserve for one
+// pending ResInit entry. NewConfig carries only the fields present on-chain.
+// Shared by computeState's full-state loop and ProjectTemporaryStateChanges.
+func (a *Adapter) queuedReserveRow(queued contracts.QueuedReserveState, ledgerSeq int64, closeTime time.Time) bindings.QueuedReserve {
+	var unlockTime time.Time
+	if unix, ok := parseUnixSeconds(queued.UnlockTimeRaw); ok {
+		unlockTime = unix
+	}
+	newConfig := map[string]string{}
+	for key, value := range map[string]string{
+		"index":      queued.NewConfig.IndexRaw,
+		"decimals":   queued.NewConfig.DecimalsRaw,
+		"c_factor":   queued.NewConfig.CFactorRaw,
+		"l_factor":   queued.NewConfig.LFactorRaw,
+		"util":       queued.NewConfig.UtilRaw,
+		"max_util":   queued.NewConfig.MaxUtilRaw,
+		"r_base":     queued.NewConfig.RBaseRaw,
+		"r_one":      queued.NewConfig.ROneRaw,
+		"r_two":      queued.NewConfig.RTwoRaw,
+		"r_three":    queued.NewConfig.RThreeRaw,
+		"reactivity": queued.NewConfig.ReactivityRaw,
+		"supply_cap": queued.NewConfig.SupplyCapRaw,
+		"enabled":    queued.NewConfig.Enabled,
+	} {
+		if value != "" {
+			newConfig[key] = value
+		}
+	}
+	return bindings.QueuedReserve{
+		ID:            stableID(a.cfg.Protocol, queued.PoolContractID, queued.AssetID, "queued_reserve"),
+		Protocol:      a.cfg.Protocol,
+		ContractID:    queued.PoolContractID,
+		AssetID:       queued.AssetID,
+		UnlockTimeRaw: queued.UnlockTimeRaw,
+		UnlockTime:    unlockTime,
+		NewConfig:     newConfig,
+		LedgerSeq:     ledgerSeq,
+		Timestamp:     closeTime,
+	}
+}
+
+// ProjectTemporaryStateChanges projects one ledger's auction/queued-reserve
+// transition set (Adapter.LastTemporaryStateChanges) into gold-facing
+// lifecycle rows: a DirtyUpsert change is resolved against the freshly folded
+// state and emitted as an Active=true row with the full payload (the same row
+// computeState emits for that entry); a DirtyRemoval change needs identity
+// only and is emitted as an Active=false row whose payload fields stay zero —
+// never a fabricated outcome (a lone removed temporary entry cannot tell a
+// filled auction from a deleted one, nor an executed queued change from a
+// cancelled one). The result carries ONLY AuctionLifecycle and
+// QueuedReserveLifecycle; every other TransformOutput slice stays empty.
+//
+// An upsert whose identity is absent from state (a malformed value the fold
+// skipped, or a create-then-remove inside one ledger — which finalizes as a
+// removal anyway) emits nothing: projecting a payload for an entry the fold
+// does not hold would fabricate state.
+func (a *Adapter) ProjectTemporaryStateChanges(state *bindings.LedgerState, changes []bindings.TemporaryStateChange, ledgerSeq int64, closeTime time.Time) *bindings.TransformOutput {
+	out := &bindings.TransformOutput{LedgerSeq: ledgerSeq}
+	if state == nil || len(changes) == 0 {
+		return out
+	}
+
+	auctions := make(map[string]contracts.AuctionState, len(state.Auctions))
+	for _, auction := range state.Auctions {
+		auctions[typedAuctionEntityKey(auction.PoolContractID, auction.UserAddress, auction.AuctionType)] = auction
+	}
+	queued := make(map[string]contracts.QueuedReserveState, len(state.QueuedReserves))
+	for _, entry := range state.QueuedReserves {
+		queued[typedReserveEntityKey(entry.PoolContractID, entry.AssetID)] = entry
+	}
+
+	for _, change := range changes {
+		switch change.Kind {
+		case bindings.TemporaryAuction:
+			if change.Action == bindings.DirtyRemoval {
+				out.AuctionLifecycle = append(out.AuctionLifecycle, bindings.AuctionLifecycle{
+					Auction: bindings.Auction{
+						ID:          stableID(a.cfg.Protocol, change.PoolContractID, change.UserAddress, auctionTypeLabel(change.AuctionType), "auction"),
+						Protocol:    a.cfg.Protocol,
+						ContractID:  change.PoolContractID,
+						UserAddress: change.UserAddress,
+						AuctionType: auctionTypeLabel(change.AuctionType),
+						LedgerSeq:   ledgerSeq,
+						Timestamp:   closeTime,
+					},
+					Active: false,
+				})
+				continue
+			}
+			auction, ok := auctions[typedAuctionEntityKey(change.PoolContractID, change.UserAddress, change.AuctionType)]
+			if !ok {
+				continue
+			}
+			out.AuctionLifecycle = append(out.AuctionLifecycle, bindings.AuctionLifecycle{
+				Auction: a.auctionRow(auction, ledgerSeq, closeTime),
+				Active:  true,
+			})
+		case bindings.TemporaryQueuedReserve:
+			if change.Action == bindings.DirtyRemoval {
+				out.QueuedReserveLifecycle = append(out.QueuedReserveLifecycle, bindings.QueuedReserveLifecycle{
+					QueuedReserve: bindings.QueuedReserve{
+						ID:         stableID(a.cfg.Protocol, change.PoolContractID, change.AssetID, "queued_reserve"),
+						Protocol:   a.cfg.Protocol,
+						ContractID: change.PoolContractID,
+						AssetID:    change.AssetID,
+						LedgerSeq:  ledgerSeq,
+						Timestamp:  closeTime,
+					},
+					Active: false,
+				})
+				continue
+			}
+			entry, ok := queued[typedReserveEntityKey(change.PoolContractID, change.AssetID)]
+			if !ok {
+				continue
+			}
+			out.QueuedReserveLifecycle = append(out.QueuedReserveLifecycle, bindings.QueuedReserveLifecycle{
+				QueuedReserve: a.queuedReserveRow(entry, ledgerSeq, closeTime),
+				Active:        true,
+			})
+		}
+	}
+	return out
 }
 
 // auctionTypeLabel maps the contract's AuctionType enum to its label form.

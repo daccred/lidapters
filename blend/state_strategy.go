@@ -34,11 +34,13 @@ import (
 
 // stateStrategy folds one ledger's owned contract_data changes into the next
 // typed LedgerState (plus the in-package silver-debug deltas, the exposed
-// dirty-positions set — see bindings.DirtyPosition — and the fold's
-// skipped-leg diagnostics — see bindings.DecodeDiagnostic). Implementations
-// own the entire chain; DecodeState/DecodeStateAt delegate here blindly.
+// dirty-positions set — see bindings.DirtyPosition — the fold's skipped-leg
+// diagnostics — see bindings.DecodeDiagnostic — and the fold's
+// auction/queued-reserve transition set — see bindings.TemporaryStateChange).
+// Implementations own the entire chain; DecodeState/DecodeStateAt delegate
+// here blindly.
 type stateStrategy interface {
-	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic)
+	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange)
 }
 
 // dirtyUserPositions is an optional capability a stateStrategy MAY implement:
@@ -62,7 +64,7 @@ type paranoidStrategy struct {
 	adapter *Adapter
 }
 
-func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
-	next, deltas, dirty, diagnostics := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, deltas, dirty, diagnostics
+func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
+	next, deltas, dirty, diagnostics, temporary := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
+	return &next, deltas, dirty, diagnostics, temporary
 }

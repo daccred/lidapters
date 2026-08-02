@@ -46,9 +46,10 @@ func (a *Adapter) DecodeState(prior *bindings.LedgerState, changes []bindings.Co
 // incremental produces byte-identical output from a carried mirror. See
 // state_strategy.go for the two-mode contract.
 func (a *Adapter) DecodeStateAt(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, error) {
-	next, _, dirty, diagnostics := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
+	next, _, dirty, diagnostics, temporary := a.state.decodeState(prior, changes, ledgerSeq, closeTime)
 	a.lastDirty = dirty
 	a.lastDiagnostics = diagnostics
+	a.lastTemporaryChanges = temporary
 	return next, nil
 }
 
@@ -192,6 +193,16 @@ type blendStateBuilder struct {
 	// bindings.DirtyPosition set DecodeState/DecodeStateAt exposes via
 	// Adapter.LastDirtyPositions.
 	dirtyUsers map[string]userIdentity
+	// dirtyTemporary collects the identity of every auction/queued-reserve
+	// entry apply touches (live write or not-live removal), keyed by the
+	// entity key (typedAuctionEntityKey / typedReserveEntityKey). It is the
+	// per-ledger scratch behind Adapter.LastTemporaryStateChanges: like
+	// dirtyUsers it is always allocated, the incremental strategy resets it in
+	// normalizeCarry beside deltas/diagnostics, and both strategies expose the
+	// same sorted transition set via finalizeTemporaryStateChanges. The
+	// identity comes from the changed ledger key, so a removal is reportable
+	// even when the fold never observed the entry's create.
+	dirtyTemporary map[string]bindings.TemporaryStateChange
 }
 
 // userIdentity is the (address, pool) pair behind a pendingPos composite key —
@@ -313,6 +324,7 @@ func newBlendStateBuilder() *blendStateBuilder {
 		aggregators:       map[string]*aggregatorBuilder{},
 		assets:            map[string]contracts.AssetMetadata{},
 		dirtyUsers:        map[string]userIdentity{},
+		dirtyTemporary:    map[string]bindings.TemporaryStateChange{},
 	}
 }
 
@@ -320,9 +332,11 @@ func newBlendStateBuilder() *blendStateBuilder {
 // only the LedgerState) and the in-package tests (which assert the sorted
 // Deltas). It rebuilds the mirror from prior, folds changes, and returns the
 // built state, the silver-debug deltas, the ledger's dirty-positions set (see
-// markPoolRemapDirty and bindings.DirtyPosition), and the ledger's skipped-leg
-// diagnostics (see positionSkipSink and bindings.DecodeDiagnostic).
-func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
+// markPoolRemapDirty and bindings.DirtyPosition), the ledger's skipped-leg
+// diagnostics (see positionSkipSink and bindings.DecodeDiagnostic), and the
+// ledger's auction/queued-reserve transition set (see
+// finalizeTemporaryStateChanges and bindings.TemporaryStateChange).
+func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
 	b := newBlendStateBuilder()
 	b.owned = a.contracts
 	b.ownedAssets = a.assets
@@ -342,6 +356,7 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	// identical dirty set regardless of which one is active.
 	markPoolRemapDirty(b.dirtyUsers, reserveIndexSnapshot(prior), b)
 	dirty := finalizeDirtyPositions(b.dirtyUsers, b.pendingPos)
+	temporary := finalizeTemporaryStateChanges(b.dirtyTemporary, b.auctions, b.queuedReserves)
 
 	// The deltas are appended from map-range iteration over the builder maps
 	// (appendPoolReserves / appendPoolUsers / appendBackstopUsersForPool), and Go
@@ -353,7 +368,7 @@ func (a *Adapter) decodeBlendState(prior *bindings.LedgerState, changes []bindin
 	sortTypedStateDeltas(b.deltas)
 	sortDecodeDiagnostics(b.diagnostics)
 
-	return next, b.deltas, dirty, b.diagnostics
+	return next, b.deltas, dirty, b.diagnostics, temporary
 }
 
 // reserveIndexSnapshot derives each pool's reserveByIndex mapping (known,
@@ -431,6 +446,54 @@ func finalizeDirtyPositions(dirty map[string]userIdentity, pendingPos map[string
 			return out[i].Address < out[j].Address
 		}
 		return out[i].PoolContractID < out[j].PoolContractID
+	})
+	return out
+}
+
+// finalizeTemporaryStateChanges turns the builder's raw temporary-state dirty
+// set into the exposed bindings.TemporaryStateChange list, sorted by (kind,
+// pool, user, auction type, asset) for byte-stable output. Action is derived
+// post-hoc from whether the identity is still live after the fold (auctions /
+// queuedReserves presence) rather than tracked incrementally — the same rule
+// finalizeDirtyPositions uses, so a create-then-remove inside one ledger
+// reports the final outcome (removal) and a remove-then-restore reports the
+// upsert. A removal's identity comes from the dirty record itself, never from
+// a prior state slice: a bounded replay that first observes an entry at its
+// removal still reports the transition.
+func finalizeTemporaryStateChanges(dirty map[string]bindings.TemporaryStateChange, auctions map[string]contracts.AuctionState, queuedReserves map[string]contracts.QueuedReserveState) []bindings.TemporaryStateChange {
+	if len(dirty) == 0 {
+		return nil
+	}
+	out := make([]bindings.TemporaryStateChange, 0, len(dirty))
+	for entityKey, change := range dirty {
+		action := bindings.DirtyRemoval
+		switch change.Kind {
+		case bindings.TemporaryAuction:
+			if _, ok := auctions[entityKey]; ok {
+				action = bindings.DirtyUpsert
+			}
+		case bindings.TemporaryQueuedReserve:
+			if _, ok := queuedReserves[entityKey]; ok {
+				action = bindings.DirtyUpsert
+			}
+		}
+		change.Action = action
+		out = append(out, change)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		if out[i].PoolContractID != out[j].PoolContractID {
+			return out[i].PoolContractID < out[j].PoolContractID
+		}
+		if out[i].UserAddress != out[j].UserAddress {
+			return out[i].UserAddress < out[j].UserAddress
+		}
+		if out[i].AuctionType != out[j].AuctionType {
+			return out[i].AuctionType < out[j].AuctionType
+		}
+		return out[i].AssetID < out[j].AssetID
 	})
 	return out
 }
@@ -1104,6 +1167,12 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		}
 		entityKey := typedAuctionEntityKey(change.ContractID, user, auctType)
 		b.auctions[entityKey] = auction
+		b.dirtyTemporary[entityKey] = bindings.TemporaryStateChange{
+			Kind:           bindings.TemporaryAuction,
+			PoolContractID: change.ContractID,
+			UserAddress:    user,
+			AuctionType:    auctType,
+		}
 		b.addDelta(ledgerSeq, "auction", entityKey, true, auction)
 	case "UserEmis":
 		user, resTokenID, ok := userReserveKeyParts(args)
@@ -1137,6 +1206,11 @@ func (b *blendStateBuilder) apply(change bindings.ContractDataChange, ledgerSeq 
 		}
 		entityKey := typedReserveEntityKey(change.ContractID, asset)
 		b.queuedReserves[entityKey] = queued
+		b.dirtyTemporary[entityKey] = bindings.TemporaryStateChange{
+			Kind:           bindings.TemporaryQueuedReserve,
+			PoolContractID: change.ContractID,
+			AssetID:        asset,
+		}
 		b.addDelta(ledgerSeq, "queued_reserve", entityKey, true, queued)
 	}
 }
@@ -1418,6 +1492,12 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		// TTL-lapsed) means the auction is gone on-chain — remove, never archive.
 		entityKey := typedAuctionEntityKey(change.ContractID, user, auctType)
 		delete(b.auctions, entityKey)
+		b.dirtyTemporary[entityKey] = bindings.TemporaryStateChange{
+			Kind:           bindings.TemporaryAuction,
+			PoolContractID: change.ContractID,
+			UserAddress:    user,
+			AuctionType:    auctType,
+		}
 		b.addDelta(ledgerSeq, "auction", entityKey, false, nil)
 	case "UserEmis":
 		user, resTokenID, ok := userReserveKeyParts(args)
@@ -1438,6 +1518,11 @@ func (b *blendStateBuilder) applyDelete(change bindings.ContractDataChange, key 
 		}
 		entityKey := typedReserveEntityKey(change.ContractID, asset)
 		delete(b.queuedReserves, entityKey)
+		b.dirtyTemporary[entityKey] = bindings.TemporaryStateChange{
+			Kind:           bindings.TemporaryQueuedReserve,
+			PoolContractID: change.ContractID,
+			AssetID:        asset,
+		}
 		b.addDelta(ledgerSeq, "queued_reserve", entityKey, false, nil)
 	}
 }

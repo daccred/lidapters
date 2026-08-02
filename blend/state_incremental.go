@@ -98,7 +98,7 @@ func newIncrementalStrategy(a *Adapter) *incrementalStrategy {
 	return &incrementalStrategy{adapter: a}
 }
 
-func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic) {
+func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
 	if s.mirror == nil || prior != s.lastOut || s.bisect.reloadEachLedger {
 		// Not a continuation of our own last output: rebuild the mirror from
 		// prior exactly as paranoid would. One O(total state) ledger, then the
@@ -114,8 +114,9 @@ func (s *incrementalStrategy) decodeState(prior *bindings.LedgerState, changes [
 	sortTypedStateDeltas(s.mirror.deltas)
 	out, dirty := s.snapshot(closeTime)
 	sortDecodeDiagnostics(s.mirror.diagnostics)
+	temporary := finalizeTemporaryStateChanges(s.mirror.dirtyTemporary, s.mirror.auctions, s.mirror.queuedReserves)
 	s.lastOut = out
-	return out, s.mirror.deltas, dirty, s.mirror.diagnostics
+	return out, s.mirror.deltas, dirty, s.mirror.diagnostics, temporary
 }
 
 // reseed rebuilds the mirror from prior via the same loadPrior the paranoid
@@ -168,6 +169,7 @@ func (s *incrementalStrategy) refreshOwned() {
 // the mirror a fresh reload of lastOut would produce:
 //
 //   - deltas are per-ledger scratch — reset; the skipped-leg diagnostics are
+//     the same per-ledger scratch — reset; the temporary-state dirty set is
 //     the same per-ledger scratch — reset;
 //   - synthesized oracles are excluded from the Oracles carry (buildOracles
 //     skips them; they are re-derived every ledger from aggregator + feed
@@ -184,6 +186,7 @@ func (s *incrementalStrategy) normalizeCarry() {
 	s.refreshOwned()
 	b.deltas = nil
 	b.diagnostics = nil
+	b.dirtyTemporary = map[string]bindings.TemporaryStateChange{}
 	for id, oracle := range b.oracles {
 		if oracle.synthesized {
 			delete(b.oracles, id)

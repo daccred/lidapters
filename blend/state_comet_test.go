@@ -678,6 +678,98 @@ func TestCometCheckpoint_RestartMatchesReplay(t *testing.T) {
 	}
 }
 
+// TestCometCheckpoint_PreCometVintageLoads is the upgrade gate: a checkpoint
+// serialized BEFORE the Comet fold existed (no AMMPools, backstop LP fields and
+// price bindings all "") must restore into a Comet-registered adapter, and the
+// first ledger carrying the Comet writes must land the full valuation — byte
+// for byte what an uninterrupted post-upgrade fold produces. The vintage is
+// simulated by folding the same deploy without Comet registration and blanking
+// the two price-binding fields; the pre-Comet reducer's output differs from
+// that only in those fields (it never populated them).
+func TestCometCheckpoint_PreCometVintageLoads(t *testing.T) {
+	t.Parallel()
+
+	f := newCometFixture(t)
+	blndAddr := contractAddressVal(t, 2)
+	usdcAddr := contractAddressVal(t, 7)
+	cometWrites := func(t *testing.T) []bindings.ContractDataChange {
+		t.Helper()
+		return []bindings.ContractDataChange{
+			stateChange(t, f.cometID, variantVal(t, "AllTokenVec"), vecVal(blndAddr, usdcAddr)),
+			stateChange(t, f.cometID, variantVal(t, "AllRecordData"), cometRecordMapVal(t,
+				xdr.ScMapEntry{Key: blndAddr, Val: cometRecordVal(t, 80_000_000_000_000, 0)},
+				xdr.ScMapEntry{Key: usdcAddr, Val: cometRecordVal(t, 4_000_000_000_000, 1)},
+			)),
+			stateChange(t, f.cometID, variantVal(t, "TotalShares"), i128Val(100_000_000_000)),
+		}
+	}
+	// The deploy ledger minus the Comet writes: what a pre-Comet relay folded.
+	preCometChanges := func(t *testing.T) []bindings.ContractDataChange {
+		t.Helper()
+		changes := f.deployChanges(t)
+		filtered := changes[:0]
+		for _, change := range changes {
+			if change.ContractID == f.cometID {
+				continue
+			}
+			filtered = append(filtered, change)
+		}
+		return filtered
+	}
+
+	// Vintage checkpoint: pre-Comet registration, then blank the price bindings
+	// the old reducer never populated.
+	vintage := newTestAdapter(t)
+	vintage.RegisterContracts(f.poolID, f.backstopID, f.oracleID)
+	vintageState, err := vintage.DecodeState(nil, preCometChanges(t), 100)
+	if err != nil {
+		t.Fatalf("vintage fold: %v", err)
+	}
+	for i := range vintageState.Backstops {
+		vintageState.Backstops[i].BLNDPriceUSD = ""
+		vintageState.Backstops[i].USDCPriceUSD = ""
+	}
+	raw, err := json.Marshal(vintageState)
+	if err != nil {
+		t.Fatalf("marshal vintage checkpoint: %v", err)
+	}
+
+	// Restore into the upgraded, Comet-registered adapter; fold the Comet writes.
+	var restored bindings.LedgerState
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatalf("unmarshal vintage checkpoint: %v", err)
+	}
+	upgraded := newTestAdapter(t)
+	f.register(upgraded)
+	fromVintage, err := upgraded.DecodeState(&restored, cometWrites(t), 101)
+	if err != nil {
+		t.Fatalf("fold on vintage checkpoint: %v", err)
+	}
+
+	// Uninterrupted post-upgrade run over the same ledgers.
+	fresh := newTestAdapter(t)
+	f.register(fresh)
+	freshDeployed, err := fresh.DecodeState(nil, preCometChanges(t), 100)
+	if err != nil {
+		t.Fatalf("fresh fold 100: %v", err)
+	}
+	fromFresh, err := fresh.DecodeState(freshDeployed, cometWrites(t), 101)
+	if err != nil {
+		t.Fatalf("fresh fold 101: %v", err)
+	}
+
+	a, _ := json.Marshal(fromVintage)
+	b, _ := json.Marshal(fromFresh)
+	if !bytes.Equal(a, b) {
+		t.Fatalf("vintage checkpoint diverged from uninterrupted fold:\nvintage=%s\nfresh=%s", a, b)
+	}
+	position := backstopFor(t, fromVintage, f.userA, f.poolID)
+	if position.LPTokenSupplyRaw != "100000000000" || position.LPBLNDReserveRaw != "80000000000000" ||
+		position.BLNDPriceUSD != "0.05" || position.USDCPriceUSD != "0.9999999" {
+		t.Fatalf("vintage checkpoint did not fold to full valuation: %+v", position)
+	}
+}
+
 // TestCometFold_PoolBackstopValued covers the pool-level aggregate row
 // (bindings.Backstop): component amounts and USD from the folded Comet state.
 func TestCometFold_PoolBackstopValued(t *testing.T) {

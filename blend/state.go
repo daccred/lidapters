@@ -498,6 +498,7 @@ func finalizeTemporaryStateChanges(dirty map[string]bindings.TemporaryStateChang
 	return out
 }
 
+// sortTypedStateDeltas sorts the per-ledger silver-debug deltas by their stable
 // total-order key. Shared by both fold strategies so their delta streams stay
 // comparable entry for entry.
 func sortTypedStateDeltas(deltas []typedStateDelta) {

@@ -400,6 +400,15 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		output.QueuedReserves = append(output.QueuedReserves, a.queuedReserveRow(queued, input.LedgerSeq, input.CloseTime))
 	}
 
+	// Pool-level backstop LP valuation (V1-09): with every pool's reserves
+	// normalized, value each aggregate Backstop row against the folded Comet
+	// state — component amounts by exact token ID, USD from the same
+	// ledger-pinned reserve prices the per-user path uses. Absent-not-zero
+	// rules are identical to the per-user path: unknown supply, a zero
+	// denominator, a missing reserve, or a missing price leg leaves the fields
+	// absent, never a fabricated zero.
+	a.valuePoolBackstops(input, output, reserves)
+
 	// The backstop contract's decoded identity: a Contract row (gold's
 	// contract_type 'backstop') carrying the instance addresses — BToken is
 	// the Comet LP anchoring share valuation — plus reward-zone membership and
@@ -733,12 +742,22 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		queuedTokens := convertBackstopSharesToTokens(queuedShares, poolShares, poolTokens)
 		totalTokens := convertBackstopSharesToTokens(totalShares, poolShares, poolTokens)
 
+		// Comet LP decomposition, absent-not-zero (D-09): every input must be a
+		// folded observation, never a defaulted one. Missing supply or either
+		// reserve leaves the components absent; a real stored-zero supply is a
+		// zero DENOMINATOR — the quotient is undefined, so the components and
+		// USD are absent with a diagnostic reason, not silently zero.
+		lpSupplyKnown := strings.TrimSpace(backstop.LPTokenSupplyRaw) != ""
+		blndReserveKnown := strings.TrimSpace(backstop.LPBLNDReserveRaw) != ""
+		usdcReserveKnown := strings.TrimSpace(backstop.LPUSDCReserveRaw) != ""
 		lpSupply := parseDecimalOrZero(backstop.LPTokenSupplyRaw)
 		blndReserve := parseDecimalOrZero(backstop.LPBLNDReserveRaw)
 		usdcReserve := parseDecimalOrZero(backstop.LPUSDCReserveRaw)
+		lpDenominatorZero := lpSupplyKnown && lpSupply.IsZero()
+		lpComponentsKnown := lpSupplyKnown && !lpSupply.IsZero() && blndReserveKnown && usdcReserveKnown
 		blndComponentRaw := decZero
 		usdcComponentRaw := decZero
-		if !lpSupply.IsZero() {
+		if lpComponentsKnown {
 			blndComponentRaw = fixedMulFloor(totalTokens, blndReserve, lpSupply)
 			usdcComponentRaw = fixedMulFloor(totalTokens, usdcReserve, lpSupply)
 		}
@@ -747,7 +766,7 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 		usdcPriceKnown := strings.TrimSpace(backstop.USDCPriceUSD) != ""
 		backstopUSD := decZero
 		backstopUSDStr := ""
-		if blndPriceKnown && usdcPriceKnown {
+		if lpComponentsKnown && blndPriceKnown && usdcPriceKnown {
 			blndPrice := parseDecimalOrZero(backstop.BLNDPriceUSD)
 			usdcPrice := parseDecimalOrZero(backstop.USDCPriceUSD)
 			blndUnits := blndComponentRaw.Div(decimal.New(1, backstop.BLNDDecimals))
@@ -766,11 +785,20 @@ func (a *Adapter) computeState(input bindings.TransformInput, output *bindings.T
 			"active_lp_tokens":    numString(activeTokens),
 			"queued_lp_tokens":    numString(queuedTokens),
 			"total_lp_tokens":     numString(totalTokens),
-			"blnd_component":      numString(blndComponentRaw),
-			"usdc_component":      numString(usdcComponentRaw),
-			"blnd_component_raw":  numString(blndComponentRaw),
-			"usdc_component_raw":  numString(usdcComponentRaw),
 			"unclaimed_emissions": backstop.UnclaimedEmissionsRaw,
+		}
+		// Component amounts only exist when every LP input was observed and the
+		// denominator is nonzero; the reason keys make the absence explicit
+		// instead of letting a missing input masquerade as a zero component.
+		if lpComponentsKnown {
+			metadata["blnd_component"] = numString(blndComponentRaw)
+			metadata["usdc_component"] = numString(usdcComponentRaw)
+			metadata["blnd_component_raw"] = numString(blndComponentRaw)
+			metadata["usdc_component_raw"] = numString(usdcComponentRaw)
+		} else if lpDenominatorZero {
+			metadata["lp_denominator_zero"] = "true"
+		} else {
+			metadata["lp_state_unavailable"] = "true"
 		}
 		if !interestKnown || !emissionsKnown {
 			metadata["apr_partial"] = "true"
@@ -1528,6 +1556,97 @@ func parseFactorRaw(raw string) (decimal.Decimal, bool) {
 		return d.Mul(factorScaleDecimal).Floor(), true
 	}
 	return d, true
+}
+
+// valuePoolBackstops fills each emitted pool-level Backstop row's LP component
+// amounts (BLNDAmountRaw / USDCAmountRaw) and USDValue from the folded Comet
+// state behind the row's backstop contract (V1-09, lidapters#31). The join is
+// by exact identity: pool's backstop contract -> decoded instance -> BToken ->
+// folded Comet pool -> Record.balance of the exact BLND/USDC token IDs. The
+// price legs reuse the normalized reserves' folded oracle prices (the same
+// ledger-pinned source as reserve valuation), bound deterministically in
+// ascending pool-contract order. Absent-not-zero (D-09): unknown LP supply, a
+// stored-zero denominator, a missing record, or a missing price leg leaves the
+// row's fields absent — no fabricated zero, no hardcoded $1.
+func (a *Adapter) valuePoolBackstops(input bindings.TransformInput, output *bindings.TransformOutput, reserves map[string]normalizedReserve) {
+	if len(output.Backstops) == 0 {
+		return
+	}
+	instances := make(map[string]contracts.BackstopInstanceState, len(input.State.BackstopInstances))
+	for _, instance := range input.State.BackstopInstances {
+		instances[instance.ContractID] = instance
+	}
+	comets := map[string]bindings.AMMPoolState{}
+	for _, pool := range input.State.AMMPools {
+		if pool.PoolType == cometPoolType {
+			comets[pool.ContractID] = pool
+		}
+	}
+	reservePrice := func(assetID string) (decimal.Decimal, bool) {
+		if assetID == "" {
+			return decZero, false
+		}
+		poolIDs := make([]string, 0, len(reserves))
+		byPool := map[string]normalizedReserve{}
+		for _, reserve := range reserves {
+			if reserve.assetID == assetID && reserve.priceAvailable {
+				poolIDs = append(poolIDs, reserve.poolContract)
+				byPool[reserve.poolContract] = reserve
+			}
+		}
+		if len(poolIDs) == 0 {
+			return decZero, false
+		}
+		sort.Strings(poolIDs)
+		return byPool[poolIDs[0]].usdPrice, true
+	}
+	for i := range output.Backstops {
+		row := &output.Backstops[i]
+		instance, ok := instances[row.BackstopContract]
+		if !ok {
+			continue
+		}
+		comet, ok := comets[instance.BackstopToken]
+		if !ok || strings.TrimSpace(comet.TotalSharesRaw) == "" {
+			continue
+		}
+		lpSupply := parseDecimalOrZero(comet.TotalSharesRaw)
+		if lpSupply.IsZero() {
+			// Stored-zero denominator: the quotient is undefined — absent, not
+			// silently zero (D-09).
+			continue
+		}
+		blndReserveRaw, usdcReserveRaw := "", ""
+		for _, token := range comet.Tokens {
+			switch token.AssetID {
+			case instance.BLNDToken:
+				blndReserveRaw = token.ReserveRaw
+			case instance.USDCToken:
+				usdcReserveRaw = token.ReserveRaw
+			}
+		}
+		if strings.TrimSpace(blndReserveRaw) == "" || strings.TrimSpace(usdcReserveRaw) == "" {
+			continue
+		}
+		blndPrice, ok := reservePrice(instance.BLNDToken)
+		if !ok {
+			continue
+		}
+		usdcPrice, ok := reservePrice(instance.USDCToken)
+		if !ok {
+			continue
+		}
+		lpTokens := parseDecimalOrZero(row.LPTokensRaw)
+		blndComponent := fixedMulFloor(lpTokens, parseDecimalOrZero(blndReserveRaw), lpSupply)
+		usdcComponent := fixedMulFloor(lpTokens, parseDecimalOrZero(usdcReserveRaw), lpSupply)
+		row.BLNDAmountRaw = numString(blndComponent)
+		row.USDCAmountRaw = numString(usdcComponent)
+		// Component decimals match the fold's stamped BLNDDecimals/USDCDecimals
+		// (both 7 on the pinned deployment).
+		usd := blndComponent.Div(decimal.New(1, 7)).Mul(blndPrice).
+			Add(usdcComponent.Div(decimal.New(1, 7)).Mul(usdcPrice))
+		row.USDValue = numString(usd)
+	}
 }
 
 func convertBackstopSharesToTokens(shares, poolShares, poolTokens decimal.Decimal) decimal.Decimal {

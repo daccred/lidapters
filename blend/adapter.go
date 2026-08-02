@@ -31,6 +31,12 @@ var _ bindings.CloseTimeStateDecoder = (*Adapter)(nil)
 // (math.go).
 var _ bindings.DirtyPositionsProvider = (*Adapter)(nil)
 
+// Adapter exposes the per-ledger affected-backstop set from its most recent
+// DecodeState/DecodeStateAt call, so a consumer doing dirty-mode emission can
+// re-emit exactly the invalidated backstop positions (O(affected holders))
+// instead of stripping them wholesale. See bindings.DirtyBackstopsProvider.
+var _ bindings.DirtyBackstopsProvider = (*Adapter)(nil)
+
 // Adapter exposes the skipped-leg diagnostics from its most recent
 // DecodeState/DecodeStateAt call, so a consumer can log and count the position
 // legs the fold could not attribute instead of discovering corrupted rows
@@ -67,6 +73,14 @@ type Adapter struct {
 	// would otherwise be misdecoded as a phantom pool. Same config-like status
 	// as contracts; does not affect DecodeState purity.
 	feeds map[string]struct{}
+	// comets is the registered Comet (BToken) LP contract set the relay edge
+	// fills via RegisterCometContracts. A Comet's contract_data (the pool's
+	// AllTokenVec/AllRecordData/TotalShares persistent entries) is routed onto
+	// the Comet decode path (state_comet.go) ahead of every Blend branch.
+	// Deliberately distinct from contracts: Comet state can never decode as
+	// Blend pool state and Blend state never as Comet (D-03). Same config-like
+	// status as contracts; does not affect DecodeState purity.
+	comets map[string]struct{}
 	// state is the state-fold strategy DecodeState delegates to, selected once
 	// at New from Config.StateMode and swapped as a whole class — paranoid (the
 	// stateless reference reducer) or incremental (the persistent-builder
@@ -76,6 +90,10 @@ type Adapter struct {
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDirtyPositions / bindings.DirtyPositionsProvider.
 	lastDirty []bindings.DirtyPosition
+	// lastDirtyBackstops is the affected-backstop set from the most recent
+	// DecodeState/DecodeStateAt call, overwritten by the next one. See
+	// LastDirtyBackstops / bindings.DirtyBackstopsProvider.
+	lastDirtyBackstops []bindings.DirtyBackstop
 	// lastDiagnostics is the skipped-leg diagnostic set from the most recent
 	// DecodeState/DecodeStateAt call, overwritten by the next one. See
 	// LastDecodeDiagnostics / bindings.DecodeDiagnosticsProvider.
@@ -92,6 +110,15 @@ type Adapter struct {
 // was an upsert or a tombstone removal. See bindings.DirtyPositionsProvider.
 func (a *Adapter) LastDirtyPositions() []bindings.DirtyPosition {
 	return a.lastDirty
+}
+
+// LastDirtyBackstops returns the (address, pool) backstop pairs whose
+// valuation inputs the most recent DecodeState/DecodeStateAt call invalidated
+// — holder balance/emission writes, pool PoolBalance writes, linked Comet
+// reserve/supply writes, or BLND/USDC price changes — and whether each pair
+// still has a balance after the fold. See bindings.DirtyBackstopsProvider.
+func (a *Adapter) LastDirtyBackstops() []bindings.DirtyBackstop {
+	return a.lastDirtyBackstops
 }
 
 // LastDecodeDiagnostics returns the non-zero position legs the most recent
@@ -301,7 +328,60 @@ func (a *Adapter) ProjectPositions(state *bindings.LedgerState, dirty []bindings
 	return out, nil
 }
 
-// dirtyPositionRows gathers the raw position rows for exactly the given dirty
+// ProjectBackstopPositions projects ONLY the given dirty (address, pool)
+// backstop pairs' rows out of state — the per-ledger-emission analog of
+// ProjectPositions for the affected-backstop set (bindings.DirtyBackstop,
+// Adapter.LastDirtyBackstops, V1-09 D-10). It reuses computeState verbatim (no
+// duplicated valuation logic): a filtered LedgerState whose Backstops slice
+// holds only the dirty pairs' rows and whose Users slice is empty.
+//
+// A caller doing per-ledger backstop emission must read ONLY Positions from
+// the result: a PositionSummary computed from a backstop-only state carries
+// just the backstop leg of each address, which is a wrong row for every
+// holder with lending positions — summaries stay with the lending projection
+// (ProjectPositions) and the fold-time whole-state pass. Reserves/Contracts
+// still cover every pool (computeState always emits those from state.Pools)
+// and Activities/Quarantine are always empty (state-only re-projection).
+// Removal pairs have no row in state.Backstops and project nothing; the
+// caller synthesizes their closed tombstone from the DirtyBackstop identity.
+func (a *Adapter) ProjectBackstopPositions(state *bindings.LedgerState, dirty []bindings.DirtyBackstop, ledgerSeq int64, closeTime time.Time) (*bindings.TransformOutput, error) {
+	out := &bindings.TransformOutput{
+		LedgerSeq:  ledgerSeq,
+		Positions:  make([]bindings.Position, 0, len(dirty)),
+		Summaries:  make([]bindings.PositionSummary, 0),
+		Reserves:   make([]bindings.Reserve, 0, 16),
+		Contracts:  make([]bindings.Contract, 0, 8),
+		Quarantine: make([]bindings.QuarantineEvent, 0, 4),
+	}
+	if state == nil || len(dirty) == 0 {
+		return out, nil
+	}
+
+	want := make(map[string]struct{}, len(dirty))
+	for _, d := range dirty {
+		want[dirtyPairKey(d.Address, d.PoolContractID)] = struct{}{}
+	}
+	backstops := make([]contracts.BackstopPosition, 0, len(dirty))
+	for _, b := range state.Backstops {
+		if _, ok := want[dirtyPairKey(b.Address, b.PoolContractID)]; ok {
+			backstops = append(backstops, b)
+		}
+	}
+	filtered := *state
+	filtered.Users = nil
+	filtered.Backstops = backstops
+
+	if err := a.computeState(bindings.TransformInput{LedgerSeq: ledgerSeq, CloseTime: closeTime, State: &filtered}, out); err != nil {
+		return nil, err
+	}
+	// A summary computed from a backstop-only state carries just the backstop
+	// leg of each address — a wrong row for any holder with lending positions.
+	// Drop them so a caller cannot merge a partial-vintage total by mistake;
+	// summaries stay with the lending projection and the whole-state pass.
+	out.Summaries = nil
+	return out, nil
+}
+
 // pairs. When the active strategy implements dirtyUserPositions (incremental
 // mode), each pair is an O(1) cache lookup; otherwise it falls back to a
 // single O(all users) scan of state.Users, matching a pair to its rows.

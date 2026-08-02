@@ -345,6 +345,33 @@ const (
 	DecodeDiagnosticDuplicateReserveIndex = "duplicate_reserve_index"
 )
 
+// DirtyBackstop is one (address, pool) backstop position whose valuation
+// inputs changed on the ledger just folded: the holder's own UserBalance or
+// its sibling UEmisData, the pool's PoolBalance (every holder's shares<->LP
+// conversion moves), a Comet LP reserve/supply write on the pool's BToken
+// contract, or a price change for the backstop's BLND/USDC legs. It is the
+// backstop analog of DirtyPosition, exposed separately because a lending
+// reserve tick must never fan out to backstop holders and a Comet/price tick
+// must never fan out to unrelated lending positions — a consumer doing
+// per-ledger emission projects ONLY these pairs (O(affected holders)) instead
+// of re-emitting every backstop position in state.
+type DirtyBackstop struct {
+	Address        string
+	PoolContractID string
+	Kind           DirtyKind
+}
+
+// DirtyBackstopsProvider is an additive capability an adapter MAY implement
+// alongside ProtocolAdapter: after a DecodeState/DecodeStateAt call, it
+// reports exactly which (address, pool) backstop pairs that ledger's changes
+// invalidated, sorted by (address, pool). Same single-fold-at-a-time contract
+// as DirtyPositionsProvider: the set reflects the most recent fold, is
+// overwritten by the next one, and must be read immediately after folding,
+// before the next ledger.
+type DirtyBackstopsProvider interface {
+	LastDirtyBackstops() []DirtyBackstop
+}
+
 // DecodeDiagnostic is one non-zero position leg the fold skipped because its
 // reserve index could not be resolved to exactly one configured reserve.
 // Skipping is financially safer than guessing (a wrong-but-plausible row is

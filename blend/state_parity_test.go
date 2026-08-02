@@ -85,8 +85,8 @@ func (r *parityRun) strategy() *incrementalStrategy {
 // red-check tests need the non-fatal form.
 func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) {
 	r.t.Helper()
-	pNext, pDeltas, pDirty, pDiags, pTemporary := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
-	iNext, iDeltas, iDirty, iDiags, iTemporary := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
+	pNext, pDeltas, pDirty, pDirtyBackstops, pDiags, pTemporary := r.paranoid.state.decodeState(r.pState, ledger.changes, ledger.seq, ledger.close)
+	iNext, iDeltas, iDirty, iDirtyBackstops, iDiags, iTemporary := r.incremental.state.decodeState(r.iState, ledger.changes, ledger.seq, ledger.close)
 	r.pState, r.iState = pNext, iNext
 	r.pDiags, r.iDiags = pDiags, iDiags
 	r.pTemporary, r.iTemporary = pTemporary, iTemporary
@@ -101,6 +101,9 @@ func (r *parityRun) foldLedger(ledger parityLedger) (equal bool, detail string) 
 	}
 	if !reflect.DeepEqual(pDirty, iDirty) {
 		return false, fmt.Sprintf("dirty-positions mismatch:\nparanoid=%+v\nincremental=%+v", pDirty, iDirty)
+	}
+	if !reflect.DeepEqual(pDirtyBackstops, iDirtyBackstops) {
+		return false, fmt.Sprintf("dirty-backstops mismatch:\nparanoid=%+v\nincremental=%+v", pDirtyBackstops, iDirtyBackstops)
 	}
 	if !reflect.DeepEqual(pDiags, iDiags) {
 		return false, fmt.Sprintf("decode-diagnostics mismatch:\nparanoid=%+v\nincremental=%+v", pDiags, iDiags)

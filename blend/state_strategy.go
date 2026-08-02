@@ -40,7 +40,7 @@ import (
 // Implementations own the entire chain; DecodeState/DecodeStateAt delegate
 // here blindly.
 type stateStrategy interface {
-	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange)
+	decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DirtyBackstop, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange)
 }
 
 // dirtyUserPositions is an optional capability a stateStrategy MAY implement:
@@ -64,7 +64,7 @@ type paranoidStrategy struct {
 	adapter *Adapter
 }
 
-func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
-	next, deltas, dirty, diagnostics, temporary := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
-	return &next, deltas, dirty, diagnostics, temporary
+func (s *paranoidStrategy) decodeState(prior *bindings.LedgerState, changes []bindings.ContractDataChange, ledgerSeq int64, closeTime time.Time) (*bindings.LedgerState, []typedStateDelta, []bindings.DirtyPosition, []bindings.DirtyBackstop, []bindings.DecodeDiagnostic, []bindings.TemporaryStateChange) {
+	next, deltas, dirty, dirtyBackstops, diagnostics, temporary := s.adapter.decodeBlendState(prior, changes, ledgerSeq, closeTime)
+	return &next, deltas, dirty, dirtyBackstops, diagnostics, temporary
 }
